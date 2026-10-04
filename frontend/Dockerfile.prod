@@ -1,0 +1,49 @@
+# ---------- build ----------
+FROM node:22-alpine AS build
+
+WORKDIR /app
+
+# Install deps first so the layer caches across code changes
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# Same-origin by default: nginx proxies /api and /ws to the backend, so the
+# browser only ever talks to one origin (no CORS, no hardcoded host).
+#
+# frontend/.dockerignore excludes .env, so every VITE_* value the bundle needs
+# must arrive as a build arg - otherwise the image would ship with no Firebase
+# config and phone auth would be dead in production.
+# VITE_WS_URL is intentionally left empty -> the app derives wss:// from the page.
+ARG VITE_API_URL=/api
+ARG VITE_WS_URL=
+ARG VITE_FIREBASE_API_KEY=
+ARG VITE_FIREBASE_AUTH_DOMAIN=
+ARG VITE_FIREBASE_PROJECT_ID=
+ARG VITE_FIREBASE_APP_ID=
+# reCAPTCHA bypass is a localhost-only affordance; keep it off in production.
+ARG VITE_FIREBASE_SKIP_RECAPTCHA=false
+
+ENV VITE_API_URL=$VITE_API_URL \
+    VITE_WS_URL=$VITE_WS_URL \
+    VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY \
+    VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN \
+    VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID \
+    VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID \
+    VITE_FIREBASE_SKIP_RECAPTCHA=$VITE_FIREBASE_SKIP_RECAPTCHA
+
+RUN npm run build
+
+# ---------- serve ----------
+FROM nginx:1.27-alpine
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+    CMD wget -qO- http://localhost/ >/dev/null || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

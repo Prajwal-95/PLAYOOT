@@ -1,0 +1,20 @@
+{
+  "name": "Playoot in Everywhere",
+  "short_name": "Playoot",
+  "description": "Multiplayer quiz platform with AI-generated questions. Create, host and play live quizzes from any device.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0f",
+  "theme_color": "#8b5cf6",
+  "categories": ["education", "games", "entertainment"],
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

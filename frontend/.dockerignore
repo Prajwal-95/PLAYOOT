@@ -1,0 +1,18 @@
+# Keep the build context small and never ship host node_modules / dist
+node_modules
+dist
+dist-ssr
+
+# Secrets (these are PUBLIC firebase web keys, but never bake them into a
+# production image - inject VITE_* at build time instead)
+.env
+.env.*
+!.env.example
+
+# NOTE: nginx.conf must stay in the context - Dockerfile.prod COPYs it into
+# the final image. It contains only proxy rules, no secrets.
+.git
+.gitignore
+.DS_Store
+Dockerfile*
+README.md

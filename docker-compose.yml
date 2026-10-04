@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: quizhost-db
+    environment:
+      POSTGRES_USER: quizhost
+      POSTGRES_PASSWORD: quizhost
+      POSTGRES_DB: quizhost
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quizhost -d quizhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: quizhost-backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://quizhost:quizhost@postgres:5432/quizhost
+      - SECRET_KEY=${SECRET_KEY:-dev-insecure-secret-change-me}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=llama-3.3-70b-versatile
+      - AI_ENABLED=true
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:4173
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/venv
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: quizhost-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+      - VITE_WS_URL=ws://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  postgres_data:

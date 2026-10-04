@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ---- Secrets: never commit these -------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+firebase-service-account.json
+*service-account*.json
+*.pem
+*.key
+*.p12
+credentials*.json
+backend/.env
+frontend/.env
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

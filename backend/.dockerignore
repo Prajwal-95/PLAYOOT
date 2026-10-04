@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Keep secrets and local state OUT of the built image.
+# `COPY . .` in the Dockerfile would otherwise copy these into a layer, where
+# they stay readable forever via `docker history` / image extraction.
+# ---------------------------------------------------------------------------
+
+# Secrets
+.env
+.env.*
+!.env.example
+firebase-service-account.json
+*service-account*.json
+*.pem
+*.key
+*.p12
+credentials*.json
+
+# Local database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Not needed at runtime
+tests/
+.git/
+.gitignore
+.dockerignore
+Dockerfile*
+README.md
