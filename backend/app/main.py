@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -56,6 +57,22 @@ async def lifespan(app: FastAPI):
             logger.exception(
                 "automatic migration failed - run 'alembic upgrade head' manually"
             )
+
+    if settings.is_postgres:
+        try:
+            db_host = settings.database_url.split("@", 1)[1].split(":", 1)[0]
+            resolved = socket.gethostbyname_ex(db_host)
+            logger.info(
+                "DATABASE DNS CHECK: host=%s addresses=%s",
+                db_host,
+                resolved[2],
+            )
+        except Exception as exc:
+            logger.error(
+                "DATABASE DNS CHECK FAILED: %s",
+                type(exc).__name__,
+            )
+
     get_registry()
     logger.info(
         "%s %s ready (env=%s, ai=%s)",
@@ -99,12 +116,18 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------- error handling
     @app.exception_handler(GameError)
     async def _game_error(_request: Request, exc: GameError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.to_payload()})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.to_payload()},
+        )
 
     @app.exception_handler(QuizGenerationError)
-    async def _ai_error(_request: Request, exc: QuizGenerationError) -> JSONResponse:
+    async def _ai_error(
+        _request: Request, exc: QuizGenerationError
+    ) -> JSONResponse:
         return JSONResponse(
-            status_code=422, content={"detail": {"code": exc.code, "message": exc.message}}
+            status_code=422,
+            content={"detail": {"code": exc.code, "message": exc.message}},
         )
 
     @app.exception_handler(RequestValidationError)
@@ -114,21 +137,27 @@ def create_app() -> FastAPI:
         """Normalise validation failures into the same error envelope."""
         errors = jsonable_encoder(exc.errors())
         first = errors[0] if errors else {}
-        location = ".".join(str(part) for part in first.get("loc", []) if part != "body")
+        location = ".".join(
+            str(part) for part in first.get("loc", []) if part != "body"
+        )
         message = first.get("msg", "The request was invalid.")
         return JSONResponse(
             status_code=422,
             content={
                 "detail": {
                     "code": "VALIDATION_ERROR",
-                    "message": f"{location}: {message}" if location else message,
+                    "message": f"{location}: {message}"
+                    if location
+                    else message,
                     "details": {"errors": errors},
                 }
             },
         )
 
     @app.exception_handler(Exception)
-    async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:
+    async def _unhandled(
+        _request: Request, exc: Exception
+    ) -> JSONResponse:
         """Last-resort handler.
 
         The traceback is logged server-side only; the client gets a stable,
@@ -161,8 +190,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict:
-        """Liveness. Deliberately free of infrastructure detail so it is safe to
-        expose publicly (no database DSN, no game PINs, no provider config)."""
+        """Liveness. Deliberately free of infrastructure detail so it is safe
+        to expose publicly (no database DSN, no game PINs, no provider config).
+        """
         return {
             "status": "ok",
             "name": settings.app_name,
@@ -191,12 +221,14 @@ def create_app() -> FastAPI:
             "status": "ok" if database_ok else "degraded",
             "database": "postgresql" if settings.is_postgres else "sqlite",
             "databaseReachable": database_ok,
-            "aiConfigured": bool(settings.groq_api_key) and settings.ai_enabled,
+            "aiConfigured": bool(settings.groq_api_key)
+            and settings.ai_enabled,
             "activeGames": len(get_registry().loaded_pins()),
             "serverTime": iso(utcnow()),
         }
         return JSONResponse(
-            status_code=200 if database_ok else 503, content=payload
+            status_code=200 if database_ok else 503,
+            content=payload,
         )
 
     return app
