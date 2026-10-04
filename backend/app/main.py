@@ -2,7 +2,7 @@
 
 Run with::
 
-    uvicorn app.main:app --reload --port 8000     # from the backend/ folder
+    uvicorn app.main:app --reload --port 8000
 """
 
 from __future__ import annotations
@@ -33,12 +33,7 @@ logger = logging.getLogger("playoot")
 
 
 def _run_migrations() -> None:
-    """Apply Alembic migrations using the synchronous driver.
-
-    Alembic is the single source of truth for the schema; this only automates
-    running it at startup during development (``AUTO_MIGRATE=false`` in
-    production, where migrations are run out-of-band).
-    """
+    """Apply Alembic migrations using the synchronous driver."""
     from alembic import command
     from alembic.config import Config
 
@@ -58,22 +53,29 @@ async def lifespan(app: FastAPI):
                 "automatic migration failed - run 'alembic upgrade head' manually"
             )
 
+    # ---------------------------------------------------------- DB DNS check
+    # This deliberately logs only the hostname/IPs, never the password.
     if settings.is_postgres:
         try:
             db_host = settings.database_url.split("@", 1)[1].split(":", 1)[0]
+
             resolved = socket.gethostbyname_ex(db_host)
+
             logger.info(
                 "DATABASE DNS CHECK: host=%s addresses=%s",
                 db_host,
                 resolved[2],
             )
+
         except Exception as exc:
             logger.error(
-                "DATABASE DNS CHECK FAILED: %s",
+                "DATABASE DNS CHECK FAILED: host=%s error=%s",
+                db_host,
                 type(exc).__name__,
             )
 
     get_registry()
+
     logger.info(
         "%s %s ready (env=%s, ai=%s)",
         settings.app_name,
@@ -81,10 +83,13 @@ async def lifespan(app: FastAPI):
         settings.environment,
         "configured" if settings.groq_api_key else "not configured",
     )
+
     try:
         yield
+
     finally:
         await get_registry().shutdown()
+
         from app.database import dispose_engine
 
         await dispose_engine()
@@ -96,12 +101,13 @@ def create_app() -> FastAPI:
         version=__version__,
         description=(
             "Server-authoritative multiplayer quiz engine. "
-            "Gameplay happens over WebSockets at /ws/game/{pin}; everything "
-            "else is REST under /api."
+            "Gameplay happens over WebSockets at /ws/game/{pin}; "
+            "everything else is REST under /api."
         ),
         lifespan=lifespan,
     )
 
+    # --------------------------------------------------------------- CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -110,61 +116,89 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # --------------------------------------------------------------- ROUTES
     app.include_router(api_router)
     app.include_router(ws_router)
 
-    # ------------------------------------------------------- error handling
+    # ------------------------------------------------------- GAME ERRORS
     @app.exception_handler(GameError)
-    async def _game_error(_request: Request, exc: GameError) -> JSONResponse:
+    async def _game_error(
+        _request: Request,
+        exc: GameError,
+    ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.to_payload()},
         )
 
+    # ---------------------------------------------------------- AI ERRORS
     @app.exception_handler(QuizGenerationError)
     async def _ai_error(
-        _request: Request, exc: QuizGenerationError
+        _request: Request,
+        exc: QuizGenerationError,
     ) -> JSONResponse:
         return JSONResponse(
             status_code=422,
-            content={"detail": {"code": exc.code, "message": exc.message}},
+            content={
+                "detail": {
+                    "code": exc.code,
+                    "message": exc.message,
+                }
+            },
         )
 
+    # ------------------------------------------------------ VALIDATION
     @app.exception_handler(RequestValidationError)
     async def _validation_error(
-        _request: Request, exc: RequestValidationError
+        _request: Request,
+        exc: RequestValidationError,
     ) -> JSONResponse:
         """Normalise validation failures into the same error envelope."""
+
         errors = jsonable_encoder(exc.errors())
         first = errors[0] if errors else {}
+
         location = ".".join(
-            str(part) for part in first.get("loc", []) if part != "body"
+            str(part)
+            for part in first.get("loc", [])
+            if part != "body"
         )
-        message = first.get("msg", "The request was invalid.")
+
+        message = first.get(
+            "msg",
+            "The request was invalid.",
+        )
+
         return JSONResponse(
             status_code=422,
             content={
                 "detail": {
                     "code": "VALIDATION_ERROR",
-                    "message": f"{location}: {message}"
-                    if location
-                    else message,
-                    "details": {"errors": errors},
+                    "message": (
+                        f"{location}: {message}"
+                        if location
+                        else message
+                    ),
+                    "details": {
+                        "errors": errors,
+                    },
                 }
             },
         )
 
+    # ------------------------------------------------------- LAST RESORT
     @app.exception_handler(Exception)
     async def _unhandled(
-        _request: Request, exc: Exception
+        _request: Request,
+        exc: Exception,
     ) -> JSONResponse:
-        """Last-resort handler.
+        """Log the traceback server-side without leaking it to clients."""
 
-        The traceback is logged server-side only; the client gets a stable,
-        curated envelope. Without this, a framework-level leak (or DEBUG=true)
-        could return stack traces, file paths or driver errors.
-        """
-        logger.exception("unhandled error: %s", type(exc).__name__)
+        logger.exception(
+            "unhandled error: %s",
+            type(exc).__name__,
+        )
+
         return JSONResponse(
             status_code=500,
             content={
@@ -175,7 +209,7 @@ def create_app() -> FastAPI:
             },
         )
 
-    # -------------------------------------------------------------- system
+    # ------------------------------------------------------------- ROOT
     @app.get("/", tags=["system"])
     async def root() -> dict:
         return {
@@ -188,11 +222,15 @@ def create_app() -> FastAPI:
             "readiness": "/api/ready",
         }
 
+    # ------------------------------------------------------------ HEALTH
     @app.get("/api/health", tags=["system"])
     async def health() -> dict:
-        """Liveness. Deliberately free of infrastructure detail so it is safe
-        to expose publicly (no database DSN, no game PINs, no provider config).
+        """Liveness endpoint.
+
+        Deliberately does not expose database credentials,
+        database hostnames, game PINs, or provider configuration.
         """
+
         return {
             "status": "ok",
             "name": settings.app_name,
@@ -201,33 +239,50 @@ def create_app() -> FastAPI:
             "serverTime": iso(utcnow()),
         }
 
+    # ------------------------------------------------------------- READY
     @app.get("/api/ready", tags=["system"])
     async def ready() -> JSONResponse:
-        """Readiness: verifies the database is actually reachable.
+        """Readiness endpoint that verifies database connectivity."""
 
-        Still safe to expose - it reports the backend *type* only, never the
-        DSN or credentials, and never lists live game PINs.
-        """
         database_ok = True
+
         try:
             async with SessionLocal() as session:
                 await session.execute(text("SELECT 1"))
+
         except Exception:
-            logger.exception("readiness database probe failed")
+            logger.exception(
+                "readiness database probe failed"
+            )
             database_ok = False
 
         payload = {
             "ready": database_ok,
-            "status": "ok" if database_ok else "degraded",
-            "database": "postgresql" if settings.is_postgres else "sqlite",
+            "status": (
+                "ok"
+                if database_ok
+                else "degraded"
+            ),
+            "database": (
+                "postgresql"
+                if settings.is_postgres
+                else "sqlite"
+            ),
             "databaseReachable": database_ok,
-            "aiConfigured": bool(settings.groq_api_key)
-            and settings.ai_enabled,
-            "activeGames": len(get_registry().loaded_pins()),
+            "aiConfigured": (
+                bool(settings.groq_api_key)
+                and settings.ai_enabled
+            ),
+            "activeGames": len(
+                get_registry().loaded_pins()
+            ),
             "serverTime": iso(utcnow()),
         }
+
         return JSONResponse(
-            status_code=200 if database_ok else 503,
+            status_code=200
+            if database_ok
+            else 503,
             content=payload,
         )
 
