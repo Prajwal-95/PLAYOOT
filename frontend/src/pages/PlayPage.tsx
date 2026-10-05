@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useGameSocket } from "../hooks/useGameSocket";
 import { GameState } from "../types/game";
@@ -15,6 +15,29 @@ export function PlayPage() {
   const questionStartRef = useRef<number | null>(null);
 
   const playerToken = gamePin ? (localStorage.getItem(`player_token_${gamePin}`) ?? undefined) : undefined;
+
+  // Keep this callback stable so the WebSocket hook does not tear the socket
+  // down and rebuild it on every render.  `useGameSocket` chains this into
+  // handleMessage -> connect -> the connect-on-mount effect, so a fresh
+  // function identity on each render closes the socket mid-handshake and
+  // reconnects, which the browser reports as code 1006.
+  const handleSocketError = useCallback((err: { message?: string; code?: string }) => {
+    setError(err?.message || "WebSocket error");
+    if (err?.code === "QUESTION_EXPIRED" || err?.code === "ALREADY_ANSWERED") {
+      // These are non-fatal
+    } else if (
+      err?.code === "GAME_ENDED" ||
+      err?.code === "GAME_CANCELLED" ||
+      err?.code === "PLAYER_NOT_IN_GAME"
+    ) {
+      setShowReconnect(false);
+    }
+  }, []);
+
+  console.log("[PLAYER GAME] mounting", {
+    gamePin,
+    hasPlayerToken: Boolean(playerToken),
+  });
 
   const {
     connected,
@@ -35,14 +58,14 @@ export function PlayPage() {
   } = useGameSocket({
     gamePin: gamePin || "",
     playerToken,
-    onError: (err) => {
-      setError(err.message);
-      if (err.code === "QUESTION_EXPIRED" || err.code === "ALREADY_ANSWERED") {
-        // These are non-fatal
-      } else if (err.code === "GAME_ENDED" || err.code === "GAME_CANCELLED" || err.code === "PLAYER_NOT_IN_GAME") {
-        setShowReconnect(false);
-      }
-    },
+    onError: handleSocketError,
+  });
+
+  console.log("[PLAYER GAME] useGameSocket enabled", {
+    gamePin,
+    hasPlayerToken: Boolean(playerToken),
+    connected,
+    connecting,
   });
 
   // Handle reconnection

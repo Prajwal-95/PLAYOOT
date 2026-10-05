@@ -45,6 +45,12 @@ export function JoinPage() {
       
       // Store player token and navigate to play page
       localStorage.setItem(`player_token_${cleanPin}`, result.player_token);
+
+      console.log("[JOIN] joinGame success", {
+        gamePin: cleanPin,
+        hasPlayerToken: Boolean(result.player_token),
+      });
+
       navigate(`/play/${cleanPin}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to join game");
