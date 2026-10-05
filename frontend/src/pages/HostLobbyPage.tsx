@@ -14,13 +14,16 @@ import {
   Card,
   CardHeader,
   CardContent,
-  CardFooter,
 } from "../components/ui/Card";
 import { cn } from "../utils/cn";
-import { GameState, Player, Team } from "../types/game";
+import { Player, Team } from "../types/game";
 
 export function HostLobbyPage() {
-  const { gameId } = useParams<{ gameId: string }>();
+  const { quizId, gamePin } = useParams<{
+    quizId?: string;
+    gamePin?: string;
+  }>();
+
   const navigate = useNavigate();
 
   const [game, setGame] = useState<GameLookupOut | null>(null);
@@ -30,13 +33,11 @@ export function HostLobbyPage() {
   const [error, setError] = useState("");
   const [starting, setStarting] = useState(false);
 
-  // WebSocket connection for host
+  // Host authentication token
   const hostToken = localStorage.getItem("access_token");
 
-  // Keep the callback reference stable so re-renders
-  // do not cause the WebSocket hook to reconnect.
-  //
-  // GameErrorPayload is the type expected by useGameSocket.
+  // Keep callback stable so the WebSocket hook does not
+  // reconnect unnecessarily during React re-renders.
   const handleSocketError = useCallback((err: any) => {
     setError(err?.message || "WebSocket error");
   }, []);
@@ -54,18 +55,31 @@ export function HostLobbyPage() {
     onError: handleSocketError,
   });
 
-  // Check if gameId is a PIN (4-6 chars, alphanumeric)
-  // or a quiz ID (numeric)
-  const isQuizId = gameId && /^\d+$/.test(gameId);
+  // ---------------------------------------------------------
+  // CREATE GAME FROM QUIZ
+  // Route: /host/quiz/:quizId
+  // ---------------------------------------------------------
 
   const createGameFromQuiz = useCallback(async () => {
-    if (!gameId || !isQuizId) return;
+    if (!quizId) {
+      return;
+    }
+
+    const parsedQuizId = Number.parseInt(quizId, 10);
+
+    if (!Number.isFinite(parsedQuizId)) {
+      setError("Invalid quiz ID.");
+      setLoading(false);
+      return;
+    }
 
     setCreatingGame(true);
+    setLoading(true);
+    setError("");
 
     try {
       const payload: GameCreateIn = {
-        quiz_id: parseInt(gameId),
+        quiz_id: parsedQuizId,
         mode: "individual",
       };
 
@@ -73,7 +87,8 @@ export function HostLobbyPage() {
 
       setGame(newGame);
 
-      // Navigate to the host lobby with the game PIN
+      // The newly-created game is identified by its GAME PIN.
+      // From this point onward /host/:gamePin loads the game.
       navigate(`/host/${newGame.game_pin}`, {
         replace: true,
       });
@@ -83,30 +98,30 @@ export function HostLobbyPage() {
           ? err.message
           : "Failed to create game"
       );
+      setLoading(false);
     } finally {
       setCreatingGame(false);
     }
-  }, [gameId, isQuizId, navigate]);
+  }, [quizId, navigate]);
 
-  useEffect(() => {
-    if (gameId && isQuizId) {
-      // This is a quiz ID, create a game first
-      createGameFromQuiz();
-    } else if (gameId) {
-      // This is a game PIN, load the game directly
-      loadGame();
+  // ---------------------------------------------------------
+  // LOAD EXISTING GAME
+  // Route: /host/:gamePin
+  // ---------------------------------------------------------
+
+  const loadGame = useCallback(async () => {
+    if (!gamePin) {
+      return;
     }
-  }, [gameId, isQuizId, createGameFromQuiz]);
 
-  const loadGame = async () => {
+    setLoading(true);
+    setError("");
+
     try {
-      setLoading(true);
-
-      const gameData = await api.lookupGame(gameId!);
+      const gameData = await api.lookupGame(gamePin);
 
       setGame(gameData);
 
-      // Load lobby data
       const lobbyData = await api.getLobby(
         gameData.game_pin
       );
@@ -118,15 +133,47 @@ export function HostLobbyPage() {
           ? err.message
           : "Failed to load game"
       );
+      setGame(null);
     } finally {
       setLoading(false);
     }
-  };
+  }, [gamePin]);
+
+  // ---------------------------------------------------------
+  // ROUTE HANDLER
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    if (quizId) {
+      createGameFromQuiz();
+      return;
+    }
+
+    if (gamePin) {
+      loadGame();
+      return;
+    }
+
+    setError("No quiz ID or game PIN was provided.");
+    setLoading(false);
+  }, [
+    quizId,
+    gamePin,
+    createGameFromQuiz,
+    loadGame,
+  ]);
+
+  // ---------------------------------------------------------
+  // HOST ACTIONS
+  // ---------------------------------------------------------
 
   const handleStartGame = async () => {
-    if (!game) return;
+    if (!game) {
+      return;
+    }
 
     setStarting(true);
+    setError("");
 
     try {
       startGame();
@@ -142,15 +189,21 @@ export function HostLobbyPage() {
   };
 
   const handleCancelGame = () => {
-    if (
-      confirm(
-        "Cancel this game? All players will be disconnected."
-      )
-    ) {
-      cancelGame();
-      navigate("/dashboard");
+    const confirmed = confirm(
+      "Cancel this game? All players will be disconnected."
+    );
+
+    if (!confirmed) {
+      return;
     }
+
+    cancelGame();
+    navigate("/dashboard");
   };
+
+  // ---------------------------------------------------------
+  // LOADING
+  // ---------------------------------------------------------
 
   if (loading || creatingGame) {
     return (
@@ -168,12 +221,22 @@ export function HostLobbyPage() {
     );
   }
 
+  // ---------------------------------------------------------
+  // GAME NOT FOUND / ERROR
+  // ---------------------------------------------------------
+
   if (!game) {
     return (
       <div className="max-w-4xl mx-auto text-center py-16">
         <h2 className="text-xl font-semibold">
           Game not found
         </h2>
+
+        {error && (
+          <p className="text-red-400 text-sm mt-3">
+            {error}
+          </p>
+        )}
 
         <Button
           variant="outline"
@@ -186,8 +249,12 @@ export function HostLobbyPage() {
     );
   }
 
-  // Use wsGame from WebSocket for live state,
-  // fallback to game from REST.
+  // ---------------------------------------------------------
+  // LIVE DATA
+  // ---------------------------------------------------------
+
+  // WebSocket data is preferred because it is live.
+  // REST data is used as the fallback.
   const displayGame = wsGame || game;
 
   const displayPlayers =
@@ -200,57 +267,85 @@ export function HostLobbyPage() {
       ? teams
       : lobby?.teams || [];
 
-  // Get state from wsGame or fallback to game.status
   const gameState =
     (displayGame as any).state ||
     game.status ||
     "LOBBY";
 
-  // Player helpers
-  const getPlayerId = (p: PlayerOut | Player) =>
-    (p as any).player_id ??
-    (p as any).playerId;
+  // ---------------------------------------------------------
+  // PLAYER HELPERS
+  // ---------------------------------------------------------
 
-  const getPlayerTeamName = (p: PlayerOut | Player) =>
-    (p as any).team_name ??
-    (p as any).teamName;
+  const getPlayerId = (
+    player: PlayerOut | Player
+  ) =>
+    (player as any).player_id ??
+    (player as any).playerId ??
+    player.nickname;
 
-  const getPlayerTeamId = (p: PlayerOut | Player) =>
-    (p as any).team_id ??
-    (p as any).teamId;
+  const getPlayerTeamName = (
+    player: PlayerOut | Player
+  ) =>
+    (player as any).team_name ??
+    (player as any).teamName;
 
-  const getPlayerScore = (p: PlayerOut | Player) =>
-    (p as any).score;
+  // ---------------------------------------------------------
+  // TEAM HELPERS
+  // ---------------------------------------------------------
 
-  // Team helpers
-  const getTeamId = (t: TeamOut | Team) =>
-    (t as any).team_id ??
-    (t as any).teamId;
+  const getTeamId = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).team_id ??
+    (team as any).teamId;
 
-  const getTeamName = (t: TeamOut | Team) =>
-    (t as any).name;
+  const getTeamName = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).name;
 
-  const getTeamMemberCount = (t: TeamOut | Team) =>
-    (t as any).member_count ??
-    (t as any).memberCount;
+  const getTeamMemberCount = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).member_count ??
+    (team as any).memberCount ??
+    0;
 
-  const getTeamMaxSize = (t: TeamOut | Team) =>
-    (t as any).max_size ??
-    (t as any).maxSize;
+  const getTeamMaxSize = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).max_size ??
+    (team as any).maxSize ??
+    4;
 
-  const getTeamIsFull = (t: TeamOut | Team) =>
-    (t as any).is_full ??
-    (t as any).isFull;
+  const getTeamIsFull = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).is_full ??
+    (team as any).isFull ??
+    false;
 
-  const getTeamMembers = (t: TeamOut | Team) =>
-    (t as any).members;
+  const getTeamMembers = (
+    team: TeamOut | Team
+  ) =>
+    (team as any).members ?? [];
+
+  // ---------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      {/* Header */}
+
+      {/* =====================================================
+          HEADER
+      ====================================================== */}
+
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+
         <div>
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-2">
+
             <h1 className="text-2xl sm:text-3xl font-bold break-words min-w-0">
               {game.quiz_title}
             </h1>
@@ -258,14 +353,19 @@ export function HostLobbyPage() {
             <span
               className={cn(
                 "px-3 py-1 text-xs sm:text-sm font-medium rounded-full whitespace-nowrap flex-shrink-0",
+
                 gameState === "LOBBY" &&
                   "bg-gray-700 text-gray-300",
+
                 gameState === "QUESTION_ACTIVE" &&
                   "bg-yellow-900/30 text-yellow-400",
+
                 gameState === "LEADERBOARD" &&
                   "bg-blue-900/30 text-blue-400",
+
                 gameState === "FINISHED" &&
                   "bg-green-900/30 text-green-400",
+
                 gameState === "CANCELLED" &&
                   "bg-red-900/30 text-red-400"
               )}
@@ -275,33 +375,40 @@ export function HostLobbyPage() {
 
             {connected && (
               <span className="text-green-400 text-sm flex items-center gap-1">
-                ● Live
+                Live
               </span>
             )}
+
           </div>
 
           <p className="text-sm sm:text-base text-gray-400 break-words">
+
             Game PIN:{" "}
+
             <span className="font-mono text-xl sm:text-2xl font-bold text-purple-400 tracking-widest">
               {game.game_pin}
             </span>
 
             {" | Mode: "}
+
             {game.mode === "team"
-              ? "👥 Team"
-              : "👤 Individual"}
+              ? "Team"
+              : "Individual"}
 
             {" | Questions: "}
+
             {game.question_count}
+
           </p>
         </div>
 
         <div className="flex flex-wrap gap-3">
+
           <Button
             variant="outline"
             onClick={() => navigate("/dashboard")}
           >
-            ← Dashboard
+            Dashboard
           </Button>
 
           {gameState === "LOBBY" &&
@@ -327,10 +434,14 @@ export function HostLobbyPage() {
                 Cancel Game
               </Button>
             )}
+
         </div>
       </div>
 
-      {/* Error */}
+      {/* =====================================================
+          ERROR
+      ====================================================== */}
+
       {error && (
         <div
           className="text-sm text-red-400 p-4 bg-red-900/20 border border-red-900/50 rounded-lg"
@@ -340,13 +451,22 @@ export function HostLobbyPage() {
         </div>
       )}
 
+      {/* =====================================================
+          MAIN GRID
+      ====================================================== */}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Players Panel */}
+
+        {/* ===================================================
+            PLAYERS
+        ==================================================== */}
+
         <Card
           variant="outlined"
           className="lg:col-span-2"
         >
           <CardHeader className="flex items-center justify-between">
+
             <h2 className="text-xl font-semibold">
               Players ({displayPlayers.length})
             </h2>
@@ -365,14 +485,22 @@ export function HostLobbyPage() {
                   Manage Teams
                 </Button>
               )}
+
           </CardHeader>
 
           <CardContent>
-            {displayPlayers.length === 0 ? (
-              <div className="text-center py-12 text-gray-500">
-                <p className="text-2xl mb-2">👥</p>
 
-                <p>No players joined yet</p>
+            {displayPlayers.length === 0 ? (
+
+              <div className="text-center py-12 text-gray-500">
+
+                <p className="text-2xl mb-2">
+                  Players
+                </p>
+
+                <p>
+                  No players joined yet
+                </p>
 
                 <p className="text-sm">
                   Share the PIN:{" "}
@@ -380,15 +508,22 @@ export function HostLobbyPage() {
                     {game.game_pin}
                   </span>
                 </p>
+
               </div>
+
             ) : (
+
               <div className="space-y-2">
+
                 {displayPlayers.map((player) => (
+
                   <div
                     key={getPlayerId(player)}
                     className="flex items-center justify-between p-3 bg-gray-800/50 rounded-lg"
                   >
+
                     <div className="flex items-center gap-3">
+
                       <span className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-sm font-bold">
                         {player.nickname
                           .charAt(0)
@@ -396,11 +531,13 @@ export function HostLobbyPage() {
                       </span>
 
                       <div>
+
                         <p className="font-medium">
                           {player.nickname}
                         </p>
 
                         <p className="text-sm text-gray-500">
+
                           {getPlayerTeamName(
                             player
                           )
@@ -413,30 +550,43 @@ export function HostLobbyPage() {
 
                           {player.connected ? (
                             <span className="text-green-400">
-                              ● Connected
+                              Connected
                             </span>
                           ) : (
                             <span className="text-yellow-400">
-                              ○ Disconnected
+                              Disconnected
                             </span>
                           )}
+
                         </p>
+
                       </div>
+
                     </div>
 
                     <span className="text-lg font-bold text-purple-400">
                       {player.score}
                     </span>
+
                   </div>
+
                 ))}
+
               </div>
+
             )}
+
           </CardContent>
         </Card>
 
-        {/* Teams Panel */}
+        {/* ===================================================
+            TEAMS
+        ==================================================== */}
+
         {game.mode === "team" && (
+
           <Card variant="outlined">
+
             <CardHeader>
               <h2 className="text-xl font-semibold">
                 Teams ({displayTeams.length})
@@ -444,62 +594,99 @@ export function HostLobbyPage() {
             </CardHeader>
 
             <CardContent>
+
               {displayTeams.length === 0 ? (
+
                 <div className="text-center py-8 text-gray-500">
-                  <p>No teams created yet</p>
+
+                  <p>
+                    No teams created yet
+                  </p>
 
                   <p className="text-sm">
                     Players can create teams after joining
                   </p>
+
                 </div>
+
               ) : (
+
                 <div className="space-y-3">
+
                   {displayTeams.map((team) => (
+
                     <div
                       key={getTeamId(team)}
                       className="p-3 bg-gray-800/50 rounded-lg"
                     >
+
                       <div className="flex items-center justify-between mb-2">
+
                         <h4 className="font-semibold">
                           {getTeamName(team)}
                         </h4>
 
                         <span className="text-sm text-gray-500">
-                          {getTeamMemberCount(team)}/
-                          {getTeamMaxSize(team)}
+
+                          {getTeamMemberCount(
+                            team
+                          )}
+
+                          /
+
+                          {getTeamMaxSize(
+                            team
+                          )}
 
                           {getTeamIsFull(team) && (
                             <span className="text-red-400 ml-1">
                               (Full)
                             </span>
                           )}
+
                         </span>
+
                       </div>
 
                       <div className="flex flex-wrap gap-1">
+
                         {getTeamMembers(team).map(
                           (
                             member: PlayerOut | Player
                           ) => (
+
                             <span
                               key={getPlayerId(member)}
                               className="px-2 py-1 text-xs bg-gray-700 rounded"
                             >
                               {member.nickname}
                             </span>
+
                           )
                         )}
+
                       </div>
+
                     </div>
+
                   ))}
+
                 </div>
+
               )}
+
             </CardContent>
+
           </Card>
+
         )}
 
-        {/* Game Info Panel */}
+        {/* ===================================================
+            GAME INFO
+        ==================================================== */}
+
         <Card variant="outlined">
+
           <CardHeader>
             <h2 className="text-xl font-semibold">
               Game Info
@@ -507,7 +694,9 @@ export function HostLobbyPage() {
           </CardHeader>
 
           <CardContent className="space-y-4">
+
             <div className="p-4 bg-gray-800/50 rounded-lg text-center">
+
               <p className="text-gray-500 text-sm">
                 Game PIN
               </p>
@@ -515,9 +704,11 @@ export function HostLobbyPage() {
               <p className="font-mono text-3xl font-bold text-purple-400 tracking-widest mt-1">
                 {game.game_pin}
               </p>
+
             </div>
 
             <div className="space-y-2 text-sm">
+
               <div className="flex justify-between">
                 <span className="text-gray-500">
                   Status
@@ -526,7 +717,7 @@ export function HostLobbyPage() {
                 <span className="font-medium capitalize">
                   {gameState
                     .toLowerCase()
-                    .replace("_", " ")}
+                    .replaceAll("_", " ")}
                 </span>
               </div>
 
@@ -581,22 +772,28 @@ export function HostLobbyPage() {
                   {displayTeams.length}
                 </span>
               </div>
+
             </div>
 
             <div className="pt-4 border-t border-gray-700">
+
               <p className="text-xs text-gray-500 text-center">
-                Share the PIN above with players. They join
-                at /join
+                Share the PIN above with players.
+                They join at /join
               </p>
+
             </div>
 
             {/* Share Link */}
+
             <div className="pt-4 border-t border-gray-700">
+
               <p className="text-xs text-gray-500 text-center mb-2">
                 Or share a direct link:
               </p>
 
               <div className="flex gap-2">
+
                 <input
                   type="text"
                   readOnly
@@ -608,21 +805,34 @@ export function HostLobbyPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => {
-                    navigator.clipboard.writeText(
-                      `${window.location.origin}/join?pin=${game.game_pin}`
-                    );
+                    const link =
+                      `${window.location.origin}/join?pin=${game.game_pin}`;
 
-                    alert(
-                      "Link copied to clipboard!"
-                    );
+                    navigator.clipboard
+                      .writeText(link)
+                      .then(() => {
+                        alert(
+                          "Link copied to clipboard!"
+                        );
+                      })
+                      .catch(() => {
+                        setError(
+                          "Could not copy link to clipboard."
+                        );
+                      });
                   }}
                 >
                   Copy Link
                 </Button>
+
               </div>
+
             </div>
+
           </CardContent>
+
         </Card>
+
       </div>
     </div>
   );
