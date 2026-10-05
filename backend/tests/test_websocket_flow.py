@@ -147,6 +147,78 @@ def test_player_socket_rejects_garbage_token(client, host, game):
 #
 # These two tests pin that guarantee down.
 # ===========================================================================
+def test_host_receives_roster_update_when_player_connects(client, host, game):
+    """Host socket connected -> player joins -> player socket connects.
+
+    The host must be told about the player over the socket.  This covers the
+    whole real-time path: engine.register_player -> broadcast_lobby_state ->
+    manager.broadcast -> the host's open socket.
+    """
+    pin = game["game_pin"]
+
+    with client.websocket_connect(f"/ws/game/{pin}?token={host['token']}") as host_ws:
+        recv_until(host_ws, "CONNECTED")
+        recv_until(host_ws, "STATE_SYNC")
+
+        session = join(client, game, "Ada")
+        player_id = session["player"]["player_id"]
+
+        # the roster event fired by register_player during the REST join
+        joined = recv_until(host_ws, "PLAYER_JOINED")
+        assert joined["payload"]["lobby"]["players"] != []
+        assert (
+            joined["payload"]["lobby"]["players"][0]["playerId"] == player_id
+        )
+        # can_start requires at least one player, so the host may now start
+        assert joined["payload"]["lobby"]["canStart"] is True
+
+        # the presence event fired when the player's socket attaches
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={session['player_token']}"
+        ) as player_ws:
+            recv_until(player_ws, "CONNECTED")
+
+            updated = recv_until(host_ws, "PLAYER_UPDATED")
+            roster = updated["payload"]["lobby"]
+            assert len(roster["players"]) == 1
+            assert roster["counts"]["players"] == 1
+            assert roster["counts"]["connectedPlayers"] == 1
+            assert roster["players"][0]["connected"] is True
+
+    # and the host is told when the player goes away again
+    with client.websocket_connect(f"/ws/game/{pin}?token={host['token']}") as host_ws:
+        recv_until(host_ws, "CONNECTED")
+        recv_until(host_ws, "STATE_SYNC")
+        session2 = join(client, game, "Bea")
+        recv_until(host_ws, "PLAYER_JOINED")
+
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={session2['player_token']}"
+        ) as player_ws:
+            recv_until(player_ws, "CONNECTED")
+            recv_until(host_ws, "PLAYER_UPDATED")
+
+        left = recv_until(host_ws, "PLAYER_UPDATED")
+        assert left["payload"]["lobby"]["counts"]["connectedPlayers"] == 0
+
+
+def test_host_state_sync_reports_connected_player(client, host, game):
+    """A host that connects after the player must see them in STATE_SYNC."""
+    pin = game["game_pin"]
+    session = join(client, game, "Ada")
+
+    with client.websocket_connect(
+        f"/ws/game/{pin}?player_token={session['player_token']}"
+    ) as player_ws:
+        recv_until(player_ws, "CONNECTED")
+
+        with client.websocket_connect(f"/ws/game/{pin}?token={host['token']}") as host_ws:
+            recv_until(host_ws, "CONNECTED")
+            state = recv_until(host_ws, "STATE_SYNC")["payload"]
+            assert len(state["players"]) == 1
+            assert state["canStart"] is True
+
+
 def test_register_failure_returns_a_clean_error_not_an_abnormal_close(
     client, host, game, monkeypatch
 ):

@@ -13,6 +13,7 @@ import type {
   AnswerSubmittedPayload,
   PlayerAnsweredPayload,
   QuestionEndedPayload,
+  LobbyPayload,
 } from "../types/game";
 import {
   WSEventType,
@@ -422,6 +423,42 @@ export function useGameSocket({
         case WSEventType.PLAYER_JOINED:
         case WSEventType.PLAYER_LEFT:
         case WSEventType.PLAYER_UPDATED: {
+          // Roster events carry a full `lobby` snapshot
+          // (see GameEngine.broadcast_lobby_state).  Replace the lobby
+          // wholesale instead of merging, so the host lobby stays live as
+          // players join, reconnect and leave.
+          const p = payload as { lobby?: LobbyPayload };
+
+          if (p.lobby) {
+            console.log("[HOST WS] lobby roster updated", {
+              event: type,
+              gamePin: p.lobby.gamePin,
+              players: p.lobby.players.length,
+              canStart: p.lobby.canStart,
+            });
+
+            setPlayers(p.lobby.players);
+            setTeams(p.lobby.teams);
+            setCanStart(p.lobby.canStart);
+
+            setGame((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    state: p.lobby!.state,
+                    quizTitle: p.lobby!.quiz?.title ?? prev.quizTitle,
+                    totalQuestions:
+                      p.lobby!.quiz?.questionCount ?? prev.totalQuestions,
+                  }
+                : prev
+            );
+          } else {
+            console.log(
+              "[WS] roster event without lobby snapshot",
+              type
+            );
+          }
+
           break;
         }
 

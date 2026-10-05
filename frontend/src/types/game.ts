@@ -333,8 +333,10 @@ export interface LobbyPayload {
   hostId: number;
   hostName: string;
   quiz: { quizId: number; title: string; questionCount: number };
-  players: PlayerOut[];
-  teams: TeamOut[];
+  // NOTE: the WebSocket roster is camelCase (GameEngine.broadcast_lobby_state
+  // -> lobby_payload), unlike the REST endpoints which return PlayerOut/TeamOut.
+  players: Player[];
+  teams: Team[];
   teamlessPlayers: number[];
   maxTeamSize: number;
   counts: {

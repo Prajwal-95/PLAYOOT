@@ -257,15 +257,22 @@ export function HostLobbyPage() {
   // REST data is used as the fallback.
   const displayGame = wsGame || game;
 
-  const displayPlayers =
-    players.length > 0
-      ? players
-      : lobby?.players || [];
+  // WebSocket data is authoritative because it is live.  The REST lobby is
+  // only a bootstrap fallback: once the socket has delivered a roster we must
+  // trust it, otherwise a stale `lobby` snapshot silently masks live updates.
+  const hasLiveRoster = players.length > 0 || teams.length > 0;
 
-  const displayTeams =
-    teams.length > 0
-      ? teams
-      : lobby?.teams || [];
+  const displayPlayers = hasLiveRoster
+    ? players
+    : lobby?.players || [];
+
+  const displayTeams = hasLiveRoster ? teams : lobby?.teams || [];
+
+  console.log("[HOST LOBBY] roster render", {
+    gamePin: game?.game_pin,
+    players: displayPlayers.length,
+    live: hasLiveRoster,
+  });
 
   const gameState =
     (displayGame as any).state ||
