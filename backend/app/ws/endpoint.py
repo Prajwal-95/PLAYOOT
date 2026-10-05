@@ -72,6 +72,8 @@ async def game_socket(
     await websocket.accept()
     connection: Connection | None = None
     engine: GameEngine | None = None
+    # debug, not info: at this point the pin is unvalidated client input
+    logger.debug("WS accepted for pin %s", pin)
 
     # ------------------------------------------------------ resolve the game
     try:
@@ -130,6 +132,11 @@ async def game_socket(
             )
             return
         role, player_id = "player", candidate_id
+        logger.info(
+            "WS player authentication succeeded for pin %s player_id=%s",
+            normalised,
+            player_id,
+        )
     elif token:
         payload = decode_token(token, expected_type=TOKEN_TYPE_HOST)
         if payload is None:
@@ -177,9 +184,21 @@ async def game_socket(
         player_id=player_id,
         user_id=user_id,
     )
-    await manager.register(connection)
 
+    # Everything below runs *after* `websocket.accept()`.  An exception that
+    # escapes this point cannot be turned into an error frame or a close code
+    # by Starlette - uvicorn simply drops the TCP connection, and the browser
+    # reports code 1006 ("abnormal closure") with no reason and no GAME_ERROR.
+    # So the remainder of the handshake lives inside this `try` on purpose.
     try:
+        logger.info(
+            "WS registering %s connection pin=%s player_id=%s", role, normalised, player_id
+        )
+        await manager.register(connection)
+        logger.info(
+            "WS %s connection registered pin=%s player_id=%s", role, normalised, player_id
+        )
+
         if player_id is not None:
             live = await engine.set_player_connected(player_id, True, broadcast=True)
             if live is None:
@@ -218,11 +237,31 @@ async def game_socket(
             await _handle_action(connection, engine, raw)
 
     except WebSocketDisconnect:
-        logger.debug("socket disconnected: %s (%s)", connection.id, role)
+        logger.info("WS disconnected pin=%s role=%s player_id=%s", normalised, role, player_id)
     except Exception:
-        logger.exception("unexpected socket failure for %s", connection.id)
+        logger.exception(
+            "WS failure after accept for pin=%s role=%s player_id=%s",
+            normalised,
+            role,
+            player_id,
+        )
+        # Must never escape: a raising handler is precisely what the browser
+        # sees as 1006.  Report a real reason and close cleanly instead.
+        await _fail(
+            websocket,
+            GameErrorCode.INTERNAL_ERROR,
+            "The connection could not be completed.",
+            CLOSE_CONFLICT,
+        )
     finally:
-        await manager.unregister(connection)
+        # guarded for the same reason as the handler above - an exception
+        # raised out of `finally` escapes the endpoint just as easily
+        try:
+            await manager.unregister(connection)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "WS failed to unregister pin=%s player_id=%s", normalised, player_id
+            )
         if player_id is not None and engine is not None:
             # a dropped socket must never destroy progress - only presence
             try:

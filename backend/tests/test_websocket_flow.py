@@ -7,6 +7,7 @@ socket to the same running engine, so this exercises the real protocol.
 from __future__ import annotations
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from conftest import join
 
@@ -25,6 +26,171 @@ def recv_until(ws, wanted, limit: int = 30):
 
 def send(ws, action: str, payload: dict | None = None) -> None:
     ws.send_json({"type": action, "payload": payload or {}})
+
+
+# ===========================================================================
+# Player-connection regression suite
+#
+# Reproduces the real production order: the HOST socket attaches first (which
+# hydrates and caches the GameEngine in the registry), the player THEN joins
+# over REST, and only afterwards opens their gameplay socket.
+#
+# `websocket.accept()` happens before every step below, so any exception raised
+# after the handshake closes the socket abnormally - which the browser reports
+# as code 1006 with no readable cause.
+# ===========================================================================
+def test_player_socket_after_host_socket_is_already_connected(client, host, game):
+    """Host connected -> player joins over REST -> player socket opens."""
+    from app.game.manager import manager
+
+    pin = game["game_pin"]
+    host_ws_ctx = client.websocket_connect(f"/ws/game/{pin}?token={host['token']}")
+    with host_ws_ctx as host_ws:
+        host_ws.receive_json()  # host CONNECTED (engine is now hydrated/cached)
+
+        # the player joins AFTER the engine has been hydrated and cached
+        session = join(client, game, "Ada")
+        player_token = session["player_token"]
+        player_id = session["player"]["player_id"]
+
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={player_token}"
+        ) as player_ws:
+            # 1. handshake succeeded (we are inside the context manager)
+            # 2. CONNECTED is received
+            connected = recv_until(player_ws, "CONNECTED")
+            assert connected["payload"]["role"] == "player"
+            assert connected["payload"]["playerId"] == player_id
+
+            # 3. STATE_SYNC is received
+            state = recv_until(player_ws, "STATE_SYNC")
+            assert state["payload"]["game"]["gamePin"] == pin
+            assert state["payload"]["me"]["playerId"] == player_id
+            assert state["payload"]["me"]["connected"] is True
+
+            # 4. no unexpected disconnect - a round trip still works
+            send(player_ws, "PING")
+            assert recv_until(player_ws, "PONG")["type"] == "PONG"
+
+            # 5. player appears in manager state while the socket is live
+            assert manager.is_player_connected(player_id) is True
+            assert player_id in manager.connected_player_ids(pin)
+            assert manager.room_size(pin) >= 2  # host + player
+
+    # and it is released again on close
+    assert manager.is_player_connected(player_id) is False
+
+
+def test_player_socket_state_sync_lists_the_player(client, host, game):
+    """The snapshot the player receives must contain their own roster entry."""
+    pin = game["game_pin"]
+    session = join(client, game, "Ada")
+    player_id = session["player"]["player_id"]
+
+    with client.websocket_connect(
+        f"/ws/game/{pin}?player_token={session['player_token']}"
+    ) as ws:
+        recv_until(ws, "CONNECTED")
+        state = recv_until(ws, "STATE_SYNC")["payload"]
+        assert [p["playerId"] for p in state["players"]] == [player_id]
+        assert state["alreadyAnswered"] is False
+        assert state["myResult"] is None
+        assert state["leaderboard"]["entries"][0]["name"] == "Ada"
+
+
+def test_player_socket_rejects_token_for_a_different_game(client, host, game, quiz):
+    """A genuine token, but bound to another game."""
+    other = client.post(
+        "/api/games", headers=host["headers"], json={"quiz_id": quiz["id"]}
+    ).json()
+    other_session = join(client, other, "Zoe")
+
+    with client.websocket_connect(
+        f"/ws/game/{game['game_pin']}?player_token={other_session['player_token']}"
+    ) as ws:
+        message = ws.receive_json()
+        assert message["type"] == "GAME_ERROR"
+        assert message["payload"]["code"] == "PLAYER_NOT_IN_GAME"
+
+
+def test_player_socket_rejects_player_not_in_the_game(client, host, game):
+    """A well-formed, correctly signed token for a player that never joined."""
+    from app.core.security import create_player_token
+
+    engine_id = game["game_id"]
+    orphan = create_player_token(999_999, engine_id, game["game_pin"])
+
+    with client.websocket_connect(
+        f"/ws/game/{game['game_pin']}?player_token={orphan}"
+    ) as ws:
+        message = ws.receive_json()
+        assert message["type"] == "GAME_ERROR"
+        assert message["payload"]["code"] == "PLAYER_NOT_IN_GAME"
+
+
+def test_player_socket_rejects_garbage_token(client, host, game):
+    with client.websocket_connect(
+        f"/ws/game/{game['game_pin']}?player_token=not-a-real-token"
+    ) as ws:
+        message = ws.receive_json()
+        assert message["type"] == "GAME_ERROR"
+        assert message["payload"]["code"] == "UNAUTHORIZED"
+
+
+# ===========================================================================
+# 1006 regression
+#
+# `websocket.accept()` runs before registration.  If anything raised after that
+# point escaped the endpoint, Starlette could not send an error frame or a close
+# code, uvicorn dropped the TCP connection, and the browser reported
+# code 1006 with no reason at all.
+#
+# These two tests pin that guarantee down.
+# ===========================================================================
+def test_register_failure_returns_a_clean_error_not_an_abnormal_close(
+    client, host, game, monkeypatch
+):
+    """A raising `manager.register()` must not escape as close code 1006."""
+    from app.ws import endpoint as ws_endpoint
+    from app.game.manager import manager
+
+    session = join(client, game, "Ada")
+
+    async def boom(_connection):
+        raise RuntimeError("simulated registry failure")
+
+    monkeypatch.setattr(manager, "register", boom)
+
+    with client.websocket_connect(
+        f"/ws/game/{game['game_pin']}?player_token={session['player_token']}"
+    ) as ws:
+        message = ws.receive_json()
+        assert message["type"] == "GAME_ERROR"
+        assert message["payload"]["code"] == "INTERNAL_ERROR"
+        # a real close code proves the teardown was graceful
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == ws_endpoint.CLOSE_CONFLICT
+
+
+def test_unregister_failure_does_not_escape_the_finally_block(
+    client, host, game, monkeypatch
+):
+    """A raising `manager.unregister()` must not escape `finally` either."""
+    from app.game.manager import manager
+
+    session = join(client, game, "Ada")
+
+    async def boom(_connection):
+        raise RuntimeError("simulated unregister failure")
+
+    monkeypatch.setattr(manager, "unregister", boom)
+
+    # closing the socket must complete normally rather than propagating
+    with client.websocket_connect(
+        f"/ws/game/{game['game_pin']}?player_token={session['player_token']}"
+    ) as ws:
+        recv_until(ws, "CONNECTED")
 
 
 @pytest.fixture
