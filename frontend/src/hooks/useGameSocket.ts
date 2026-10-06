@@ -472,7 +472,11 @@ export function useGameSocket({
               : null
           );
 
-          setLeaderboard(p.finalLeaderboard);
+          // Host payload carries the authoritative final leaderboard.
+          // The backend strips it from player payloads (score privacy is
+          // enforced server-side), so players simply stay score-free here.
+          setLeaderboard(p.finalLeaderboard ?? null);
+          setHasMoreQuestions(false);
 
           break;
         }

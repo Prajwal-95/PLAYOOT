@@ -314,8 +314,10 @@ export interface GameFinishedPayload {
   endedAt: string;
   totalQuestions: number;
   playerCount: number;
-  leaderboard: Leaderboard;
-  finalLeaderboard: Leaderboard;
+  // Both leaderboard fields are HOST-ONLY: sanitize_event_for_player strips
+  // them from player payloads, so they must be optional here.
+  leaderboard?: Leaderboard;
+  finalLeaderboard?: Leaderboard;
 }
 
 export interface GameCancelledPayload {

@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
 import { useGameSocket } from "../hooks/useGameSocket";
 import { GameState } from "../types/game";
 import { Button } from "../components/ui/Button";
@@ -148,26 +149,78 @@ export function PlayPage() {
     );
   }
 
-  // Game cancelled/finished
-  if (game && (game.state === GameState.CANCELLED || game.state === GameState.FINISHED)) {
+  // Game cancelled/finished — PLAYER view only.
+  //
+  // Role-based, never device-based: the WebSocket `role` decides. A host on
+  // this route falls through to the host stage below and gets the full final
+  // results presentation instead.
+  if (
+    game &&
+    role !== "host" &&
+    (game.state === GameState.CANCELLED || game.state === GameState.FINISHED)
+  ) {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
         <Card className="w-full max-w-md text-center">
           <CardContent className="py-12">
-            <div className="text-6xl mb-4">
-              {game.state === GameState.FINISHED ? "ðŸ†" : "ðŸš«"}
-            </div>
-            <h1 className="text-2xl font-bold mb-2">
-              {game.state === GameState.FINISHED ? "Game Finished!" : "Game Cancelled"}
-            </h1>
-            <p className="text-gray-400 mb-6">
-              {game.state === GameState.FINISHED 
-                ? "Thanks for playing! Check the host screen for final results."
-                : "The host cancelled the game."}
-            </p>
-            <Button variant="outline" onClick={handleLeave} className="w-full">
-              Return to Join
-            </Button>
+            {game.state === GameState.FINISHED ? (
+              // PLAYER END SCREEN - role-based, no score data of any kind.
+              // The backend never sends leaderboard/scores/ranking to player
+              // sockets (sanitize_event_for_player), so there is nothing
+              // score-related on this screen by construction.
+              <div className="space-y-6">
+                <motion.div
+                  initial={{ scale: 0.7, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: "spring", stiffness: 150, damping: 15 }}
+                  className="space-y-5"
+                >
+                  <motion.span
+                    initial={{ y: -20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 0.2 }}
+                    className="text-7xl block"
+                  >
+                    🎉
+                  </motion.span>
+
+                  <motion.h1
+                    initial={{ y: 20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 0.35 }}
+                    className="text-4xl sm:text-5xl font-black text-white"
+                  >
+                    QUIZ COMPLETE
+                  </motion.h1>
+
+                  <motion.div
+                    initial={{ y: 20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 0.55 }}
+                    className="mt-6 p-6 rounded-xl bg-gradient-to-br from-purple-900/30 to-indigo-900/30 border border-purple-500/30"
+                  >
+                    <p className="text-lg text-gray-300 leading-relaxed">
+                      See the host screen
+                      <br />
+                      for the final results
+                    </p>
+                  </motion.div>
+                </motion.div>
+
+                <Button variant="outline" onClick={handleLeave} className="w-full">
+                  Return to Join
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="text-6xl mb-4">🚫</div>
+                <h1 className="text-2xl font-bold mb-2">Game Cancelled</h1>
+                <p className="text-gray-400 mb-6">The host cancelled the game.</p>
+                <Button variant="outline" onClick={handleLeave} className="w-full">
+                  Return to Join
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

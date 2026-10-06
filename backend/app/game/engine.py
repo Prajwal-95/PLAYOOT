@@ -554,7 +554,8 @@ class GameEngine:
             return True
 
     async def _finalize_locked(self, reason: str) -> None:
-        """QUESTION_ACTIVE -> QUESTION_REVEAL -> LEADERBOARD, broadcasting both."""
+        """QUESTION_ACTIVE -> QUESTION_REVEAL -> LEADERBOARD, broadcasting both.
+        If this was the final question, automatically transition to FINISHED."""
         self._cancel_timer()
         question = self.current_question
         self._transition(GameState.QUESTION_REVEAL)
@@ -584,6 +585,10 @@ class GameEngine:
                 "state": self.state.value,
             },
         )
+
+        # If this was the final question, automatically finish the game
+        if not self.has_more_questions:
+            await self._finish_locked("completed")
 
     async def _sync_team_scores(self) -> None:
         """Recompute and persist team totals via the centralised strategy."""
@@ -620,13 +625,24 @@ class GameEngine:
                 raise GameError(
                     GameErrorCode.GAME_NOT_ACTIVE, "Start the game before advancing."
                 )
+            # If already finished/cancelled, clicking "Next" is a no-op
+            if self.is_terminal:
+                return
             if self.state == GameState.QUESTION_ACTIVE:
                 # advancing mid-question is the same as closing it early
                 await self._finalize_locked("host-advance")
+                # _finalize_locked auto-finishes if this was the last question
+                # If the game is now terminal, don't try to advance further
+                if self.is_terminal:
+                    return
+                # Otherwise fall through to start the next question
             if self.state == GameState.QUESTION_REVEAL:
                 await self._sync_team_scores()
                 self._transition(GameState.LEADERBOARD)
                 await self._persist()
+                # If this was the final question, _finalize_locked already auto-finished
+                if not self.has_more_questions:
+                    return
             if not self.has_more_questions:
                 await self._finish_locked("completed")
                 return
