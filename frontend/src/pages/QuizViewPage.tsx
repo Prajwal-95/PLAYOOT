@@ -28,6 +28,7 @@ export function QuizViewPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [winnersCount, setWinnersCount] = useState<1 | 3 | 5 | 10>(3);
 
   const [editForm, setEditForm] = useState<QuestionForm>({
     question_text: "",
@@ -53,6 +54,9 @@ export function QuizViewPage() {
       );
 
       setQuiz(data);
+      if (data.winners_count) {
+        setWinnersCount(data.winners_count);
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -78,6 +82,7 @@ export function QuizViewPage() {
         title: quiz.title,
         description: quiz.description,
         questions: quiz.questions,
+        winners_count: winnersCount,
       });
 
       setError("");
@@ -481,6 +486,29 @@ export function QuizViewPage() {
             {quiz.questions.length} questions •{" "}
             {quiz.source_type}
           </p>
+        </div>
+
+        <div className="flex items-center gap-4 sm:gap-3">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-300">Winners:</label>
+            <div className="flex gap-2">
+              {([1, 3, 5, 10] as const).map((count) => (
+                <button
+                  key={count}
+                  type="button"
+                  onClick={() => setWinnersCount(count)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-sm font-medium border-2 transition-all duration-200",
+                    winnersCount === count
+                      ? "border-transparent bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-playoot-sm"
+                      : "border-white/10 bg-white/5 text-gray-300 hover:border-white/25 hover:bg-white/10"
+                  )}
+                >
+                  Top {count}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="flex gap-3">

@@ -51,6 +51,8 @@ export interface HostGamePanelProps {
   // Total questions in the quiz. Required when game finishes because
   // currentQuestion/reveal become null but we still need to display the count.
   totalQuestions?: number;
+  // Number of winners to show (from quiz configuration)
+  winnersCount?: number;
 }
 
 export function HostGamePanel({
@@ -65,6 +67,7 @@ export function HostGamePanel({
   onEndQuestion,
   onEndGame,
   totalQuestions,
+  winnersCount = 3,
 }: HostGamePanelProps) {
   const isActive = gameState === GameState.QUESTION_ACTIVE;
   const isReveal =
@@ -149,19 +152,19 @@ export function HostGamePanel({
   // Get sorted entries for final leaderboard
   const finalEntries = leaderboard?.entries ?? [];
 
-  // Winner is the first entry (already sorted by score desc)
-  const winner = finalEntries[0];
+  // Winners are the top N entries (already sorted by score desc)
+  const winners = finalEntries.slice(0, winnersCount || 3);
 
   // Animation phase states
-  const [phase, setPhase] = useState<"quizComplete" | "suspense" | "reveal" | "winner" | "celebration">("quizComplete");
+  const [phase, setPhase] = useState<"quizComplete" | "suspense" | "reveal" | "winners" | "celebration">("quizComplete");
 
   // Trigger animation sequence when final results appear
   useEffect(() => {
     if (isFinalResults) {
       const timer1 = setTimeout(() => setPhase("suspense"), 800);
       const timer2 = setTimeout(() => setPhase("reveal"), 1800);
-      const timer3 = setTimeout(() => setPhase("winner"), 1800 + finalEntries.length * 300 + 800);
-      const timer4 = setTimeout(() => setPhase("celebration"), 1800 + finalEntries.length * 300 + 1600);
+      const timer3 = setTimeout(() => setPhase("winners"), 1800 + finalEntries.length * 200 + 800);
+      const timer4 = setTimeout(() => setPhase("celebration"), 1800 + finalEntries.length * 200 + 1600);
       return () => {
         clearTimeout(timer1);
         clearTimeout(timer2);
@@ -307,7 +310,7 @@ export function HostGamePanel({
 
           {/* PHASE 2: SUSPENSE - FINAL RESULTS TITLE */}
           <AnimatePresence mode="wait">
-            {(phase === "suspense" || phase === "reveal" || phase === "winner" || phase === "celebration") && (
+            {(phase === "suspense" || phase === "reveal" || phase === "winners" || phase === "celebration") && (
               <motion.div
                 key="finalResultsTitle"
                 initial={{ y: -20, opacity: 0 }}
@@ -335,7 +338,7 @@ export function HostGamePanel({
 
           {/* PHASE 3: PLAYER REVEAL - Leaderboard entries from bottom to top */}
           <AnimatePresence mode="wait">
-            {(phase === "reveal" || phase === "winner" || phase === "celebration") && (
+            {(phase === "reveal" || phase === "winners" || phase === "celebration") && (
               <motion.div
                 key="leaderboard"
                 initial={{ opacity: 0 }}
@@ -351,62 +354,58 @@ export function HostGamePanel({
                         .reverse()
                         .map((entry, reverseIndex) => {
                           const delay = reverseIndex * 200;
-                          const isWinner = entry.rank === 1;
-                          // The #1 row stays hidden through the suspense
-                          // phases and only lands with the winner reveal.
-                          const shouldShow = !isWinner || phase === "celebration";
+                          const isWinner = winners.some(w => w.id === entry.id);
+                          // All entries shown during reveal phase
                           
                           return (
                             <AnimatePresence key={entry.id} mode="wait">
-                              {shouldShow && (
-                                <motion.div
-                                  key={entry.id}
-                                  initial={{ x: -50, opacity: 0 }}
-                                  animate={{ x: 0, opacity: 1 }}
-                                  exit={{ x: 50, opacity: 0 }}
-                                  transition={{ delay, duration: 0.4, ease: "easeOut" }}
-                                  className={cn(
-                                    "flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-800/60 transition-all",
-                                    isWinner && "bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border border-yellow-500/30"
-                                  )}
-                                >
-                                  <div className="flex items-center gap-3 min-w-0">
-                                    <motion.span
-                                      initial={{ scale: 0 }}
-                                      animate={{ scale: 1 }}
-                                      transition={{ delay: delay + 100, type: "spring", stiffness: 200, damping: 15 }}
-                                      className={cn(
-                                        "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
-                                        entry.rank === 1
-                                          ? "bg-yellow-500 text-black"
-                                          : entry.rank === 2
-                                          ? "bg-gray-400 text-black"
-                                          : entry.rank === 3
-                                          ? "bg-amber-700 text-white"
-                                          : "bg-gray-700 text-gray-300"
-                                      )}
-                                    >
-                                      {entry.rank}
-                                    </motion.span>
-                                    <motion.span
-                                      initial={{ x: -20, opacity: 0 }}
-                                      animate={{ x: 0, opacity: 1 }}
-                                      transition={{ delay: delay + 150 }}
-                                      className="font-medium truncate"
-                                    >
-                                      {entry.name}
-                                    </motion.span>
-                                  </div>
+                              <motion.div
+                                key={entry.id}
+                                initial={{ x: -50, opacity: 0 }}
+                                animate={{ x: 0, opacity: 1 }}
+                                exit={{ x: 50, opacity: 0 }}
+                                transition={{ delay, duration: 0.4, ease: "easeOut" }}
+                                className={cn(
+                                  "flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-800/60 transition-all",
+                                  isWinner && "bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border border-yellow-500/30"
+                                )}
+                              >
+                                <div className="flex items-center gap-3 min-w-0">
                                   <motion.span
-                                    initial={{ x: 20, opacity: 0 }}
+                                    initial={{ scale: 0 }}
+                                    animate={{ scale: 1 }}
+                                    transition={{ delay: delay + 100, type: "spring", stiffness: 200, damping: 15 }}
+                                    className={cn(
+                                      "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
+                                      entry.rank === 1
+                                        ? "bg-yellow-500 text-black"
+                                        : entry.rank === 2
+                                        ? "bg-gray-400 text-black"
+                                        : entry.rank === 3
+                                        ? "bg-amber-700 text-white"
+                                        : "bg-gray-700 text-gray-300"
+                                    )}
+                                  >
+                                    {entry.rank}
+                                  </motion.span>
+                                  <motion.span
+                                    initial={{ x: -20, opacity: 0 }}
                                     animate={{ x: 0, opacity: 1 }}
                                     transition={{ delay: delay + 150 }}
-                                    className="font-bold text-purple-300 whitespace-nowrap"
+                                    className="font-medium truncate"
                                   >
-                                    {entry.score}
+                                    {entry.name}
                                   </motion.span>
-                                </motion.div>
-                              )}
+                                </div>
+                                <motion.span
+                                  initial={{ x: 20, opacity: 0 }}
+                                  animate={{ x: 0, opacity: 1 }}
+                                  transition={{ delay: delay + 150 }}
+                                  className="font-bold text-purple-300 whitespace-nowrap"
+                                >
+                                  {entry.score}
+                                </motion.span>
+                              </motion.div>
                             </AnimatePresence>
                           );
                         })}
@@ -417,11 +416,11 @@ export function HostGamePanel({
             )}
           </AnimatePresence>
 
-          {/* PHASE 4: WINNER REVEAL */}
+          {/* PHASE 4: WINNERS REVEAL */}
           <AnimatePresence mode="wait">
-            {winner && (phase === "winner" || phase === "celebration") && (
+            {(phase === "winners" || phase === "celebration") && winners.length > 0 && (
               <motion.div
-                key="winnerReveal"
+                key="winnersReveal"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="relative"
@@ -440,89 +439,113 @@ export function HostGamePanel({
                     animate={{ scale: 1 }}
                     className="text-2xl sm:text-3xl font-bold text-yellow-300 uppercase tracking-wider animate-pulse"
                   >
-                    AND THE WINNER IS...
+                    {winners.length === 1 ? "AND THE WINNER IS..." : `TOP ${winners.length} WINNERS...`}
                   </motion.h3>
                 </motion.div>
 
-                {/* Winner card - only mounts when the reveal phase lands */}
+                {/* Winners cards - only mounts when the reveal phase lands */}
                 {phase === "celebration" && (
-                <motion.div
-                  initial={{ scale: 0.5, y: 50, opacity: 0 }}
-                  animate={{ scale: 1, y: 0, opacity: 1 }}
-                  transition={{ type: "spring", stiffness: 150, damping: 12 }}
-                  className="relative"
-                >
-                  <Card
-                    variant="outlined"
-                    className="relative overflow-hidden bg-gradient-to-br from-yellow-500/10 via-amber-500/5 to-orange-500/10 border-2 border-yellow-500/50"
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.5 }}
+                    className="space-y-4"
                   >
-                    <CardContent className="py-10 px-6 relative">
-                      {/* Confetti/decoration */}
-                      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                        <motion.div
-                          animate={{ rotate: 360 }}
-                          transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-gradient-to-r from-yellow-400/20 via-transparent to-amber-400/20 rounded-full blur-3xl"
-                        />
-                      </div>
-
-                      <div className="relative z-10 text-center space-y-4">
-                        <motion.span
-                          animate={{ scale: [1, 1.1, 1] }}
-                          transition={{ duration: 1.5, repeat: Infinity }}
-                          className="text-7xl block"
+                    {winners.map((winner, index) => (
+                      <motion.div
+                        key={winner.id}
+                        initial={{ scale: 0.5, y: 50, opacity: 0 }}
+                        animate={{ scale: 1, y: 0, opacity: 1 }}
+                        transition={{ type: "spring", stiffness: 150, damping: 12, delay: index * 0.2 }}
+                        className="relative"
+                      >
+                        <Card
+                          variant="outlined"
+                          className={cn(
+                            "relative overflow-hidden",
+                            index === 0
+                              ? "bg-gradient-to-br from-yellow-500/10 via-amber-500/5 to-orange-500/10 border-2 border-yellow-500/50"
+                              : index === 1
+                              ? "bg-gradient-to-br from-gray-400/10 via-gray-500/5 to-gray-600/10 border-2 border-gray-400/50"
+                              : index === 2
+                              ? "bg-gradient-to-br from-amber-700/10 via-amber-800/5 to-orange-700/10 border-2 border-amber-700/50"
+                              : "bg-gradient-to-br from-purple-500/10 via-indigo-500/5 to-purple-600/10 border-2 border-purple-500/50"
+                          )}
                         >
-                          🏆
-                        </motion.span>
+                          <CardContent className="py-8 px-6 relative">
+                            {/* Confetti/decoration for 1st place */}
+                            {index === 0 && (
+                              <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                                <motion.div
+                                  animate={{ rotate: 360 }}
+                                  transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                                  className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-gradient-to-r from-yellow-400/20 via-transparent to-amber-400/20 rounded-full blur-3xl"
+                                />
+                              </div>
+                            )}
 
-                        <motion.h2
-                          initial={{ y: 20, opacity: 0 }}
-                          animate={{ y: 0, opacity: 1 }}
-                          transition={{ delay: 0.3 }}
-                          className="text-sm uppercase tracking-widest text-yellow-400 font-bold"
-                        >
-                          WINNER
-                        </motion.h2>
+                            <div className="relative z-10 text-center space-y-3">
+                              <motion.span
+                                animate={index === 0 ? { scale: [1, 1.1, 1] } : {}}
+                                transition={{ duration: 1.5, repeat: Infinity }}
+                                className="text-6xl block"
+                              >
+                                {index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : "🏅"}
+                              </motion.span>
 
-                        <motion.h1
-                          initial={{ y: 20, opacity: 0, scale: 0.9 }}
-                          animate={{ y: 0, opacity: 1, scale: 1 }}
-                          transition={{ delay: 0.5, type: "spring", stiffness: 100, damping: 10 }}
-                          className="text-5xl sm:text-7xl font-black text-white"
-                        >
-                          {winner.name}
-                        </motion.h1>
+                              <motion.h2
+                                initial={{ y: 20, opacity: 0 }}
+                                animate={{ y: 0, opacity: 1 }}
+                                transition={{ delay: 0.3 }}
+                                className="text-sm uppercase tracking-widest text-yellow-400 font-bold"
+                              >
+                                {index === 0 ? "WINNER" : index === 1 ? "RUNNER-UP" : index === 2 ? "THIRD PLACE" : `PLACE ${index + 1}`}
+                              </motion.h2>
 
-                        <motion.div
-                          initial={{ y: 20, opacity: 0, scale: 0.9 }}
-                          animate={{ y: 0, opacity: 1, scale: 1 }}
-                          transition={{ delay: 0.7, type: "spring", stiffness: 100, damping: 10 }}
-                          className="inline-flex items-center gap-2 px-6 py-2 rounded-full bg-yellow-500/20 border border-yellow-500/50"
-                        >
-                          <span className="text-2xl">🏅</span>
-                          <span className="text-2xl sm:text-3xl font-black text-yellow-400 tabular-nums">
-                            {winner.score} POINTS
-                          </span>
-                        </motion.div>
+                              <motion.h1
+                                initial={{ y: 20, opacity: 0, scale: 0.9 }}
+                                animate={{ y: 0, opacity: 1, scale: 1 }}
+                                transition={{ delay: 0.5, type: "spring", stiffness: 100, damping: 10 }}
+                                className={cn(
+                                  "font-black text-white",
+                                  index === 0 ? "text-5xl sm:text-7xl" : "text-3xl sm:text-4xl"
+                                )}
+                              >
+                                {winner.name}
+                              </motion.h1>
 
-                        {winner.teamName && (
-                          <motion.p
-                            initial={{ y: 10, opacity: 0 }}
-                            animate={{ y: 0, opacity: 1 }}
-                            transition={{ delay: 0.9 }}
-                            className="text-sm text-gray-400"
-                          >
-                            Team: {winner.teamName}
-                          </motion.p>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                </motion.div>
+                              <motion.div
+                                initial={{ y: 20, opacity: 0, scale: 0.9 }}
+                                animate={{ y: 0, opacity: 1, scale: 1 }}
+                                transition={{ delay: 0.7, type: "spring", stiffness: 100, damping: 10 }}
+                                className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-yellow-500/20 border border-yellow-500/50"
+                              >
+                                <span className="text-xl">{index === 0 ? "🏆" : index === 1 ? "🥈" : index === 2 ? "🥉" : "🏅"}</span>
+                                <span className={cn("font-black text-yellow-400 tabular-nums", index === 0 ? "text-2xl sm:text-3xl" : "text-xl sm:text-2xl")}>
+                                  {winner.score} POINTS
+                                </span>
+                              </motion.div>
+
+                              {winner.teamName && (
+                                <motion.p
+                                  initial={{ y: 10, opacity: 0 }}
+                                  animate={{ y: 0, opacity: 1 }}
+                                  transition={{ delay: 0.9 }}
+                                  className="text-sm text-gray-400"
+                                >
+                                  Team: {winner.teamName}
+                                </motion.p>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </motion.div>
+                    ))}
+                  </motion.div>
                 )}
 
-                {/* Celebration particles */}
-                {phase === "celebration" && (
+                {/* Celebration particles for 1st place */}
+                {phase === "celebration" && winners.length > 0 && (
                   <CelebrationParticles />
                 )}
               </motion.div>

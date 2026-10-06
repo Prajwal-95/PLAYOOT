@@ -70,6 +70,7 @@ export function PlayPage() {
     nextQuestion,
     endQuestion,
     endGame,
+    winnersCount,
   } = useGameSocket({
     gamePin: gamePin || "",
     playerToken,
@@ -298,6 +299,7 @@ export function PlayPage() {
             onEndQuestion={endQuestion}
             onEndGame={endGame}
             totalQuestions={game?.totalQuestions}
+            winnersCount={winnersCount ?? 3}
           />
         </main>
       </div>

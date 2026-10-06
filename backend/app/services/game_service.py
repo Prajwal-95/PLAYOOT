@@ -103,6 +103,8 @@ async def create_game(
     await session.refresh(game)
     logger.info("game %s created for quiz %s by user %s", game.game_pin, quiz_id, host.id)
     return game
+
+
 async def join_game(
     session: AsyncSession,
     *,

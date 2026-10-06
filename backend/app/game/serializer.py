@@ -438,6 +438,7 @@ def sanitize_event_for_player(
         safe = dict(payload)
         safe.pop("leaderboard", None)
         safe.pop("finalLeaderboard", None)
+        safe.pop("winnersCount", None)
         return safe
     if event_type in (
         "PLAYER_JOINED",

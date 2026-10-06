@@ -58,7 +58,7 @@ from app.game.serializer import (
 )
 from app.game.states import ANSWERABLE_STATES, JOINABLE_STATES, GameState, can_transition
 from app.models.game import Answer, GameSession, Player, Team
-from app.models.quiz import Question
+from app.models.quiz import Question, Quiz
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ class GameEngine:
         question_ends_at: datetime | None,
         connection_manager: ConnectionManager | None = None,
         scorer: ScoringStrategy | None = None,
+        quiz: Quiz | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.id = game_id
@@ -116,6 +117,7 @@ class GameEngine:
         self.manager = connection_manager or default_manager
         self.scorer: ScoringStrategy = scorer or scoring_service
         self._timer_task: asyncio.Task[None] | None = None
+        self.quiz = quiz
 
     # ------------------------------------------------------------ helpers
     @property
@@ -277,6 +279,7 @@ class GameEngine:
             question_ends_at=as_utc(game.question_ends_at),
             connection_manager=connection_manager,
             scorer=scorer,
+            quiz=game.quiz,
         )
         await engine._rehydrate_current_answers(session)
         return engine
@@ -705,6 +708,7 @@ class GameEngine:
                 "playerCount": len(self.players),
                 "leaderboard": leaderboard_payload(self),
                 "finalLeaderboard": leaderboard_payload(self),
+                "winnersCount": self.quiz.winners_count if self.quiz and self.quiz.winners_count else 3,
             },
         )
 

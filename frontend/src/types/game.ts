@@ -318,6 +318,7 @@ export interface GameFinishedPayload {
   // them from player payloads, so they must be optional here.
   leaderboard?: Leaderboard;
   finalLeaderboard?: Leaderboard;
+  winnersCount?: number;
 }
 
 export interface GameCancelledPayload {

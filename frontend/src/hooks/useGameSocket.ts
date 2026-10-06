@@ -54,6 +54,7 @@ interface UseGameSocketReturn {
   canStart: boolean;
   serverTime: string | null;
   hasMoreQuestions: boolean;
+  winnersCount: number | null;
 
   // Actions
   sendAction: (
@@ -162,6 +163,8 @@ export function useGameSocket({
 
   // Whether another question follows the one currently on screen.
   const [hasMoreQuestions, setHasMoreQuestions] = useState(true);
+
+  const [winnersCount, setWinnersCount] = useState<number | null>(null);
 
   // ---------------------------------------------------------
   // SERVER-AUTHORITATIVE DEADLINE
@@ -477,6 +480,9 @@ export function useGameSocket({
           // enforced server-side), so players simply stay score-free here.
           setLeaderboard(p.finalLeaderboard ?? null);
           setHasMoreQuestions(false);
+          if (p.winnersCount) {
+            setWinnersCount(p.winnersCount);
+          }
 
           break;
         }
@@ -1170,6 +1176,7 @@ export function useGameSocket({
     canStart,
     serverTime,
     hasMoreQuestions,
+    winnersCount,
 
     // Actions
     sendAction,

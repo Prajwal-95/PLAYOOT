@@ -169,12 +169,14 @@ export interface QuizCreateIn {
   description: string | null;
   source_type: "topic" | "pdf" | "prompt" | "manual";
   questions: QuestionIn[];
+  winners_count?: 1 | 3 | 5 | 10;
 }
 
 export interface QuizUpdateIn {
   title?: string;
   description?: string | null;
   questions?: QuestionIn[] | null;
+  winners_count?: 1 | 3 | 5 | 10 | null;
 }
 
 export interface GenerateQuizIn {

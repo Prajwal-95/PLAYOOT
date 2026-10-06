@@ -123,12 +123,14 @@ class QuizCreateIn(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     source_type: SourceType = "manual"
     questions: list[QuestionIn] = Field(default_factory=list)
+    winners_count: Literal[1, 3, 5, 10] = Field(default=3, description="Number of winners to announce")
 
 
 class QuizUpdateIn(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=2000)
     questions: list[QuestionIn] | None = None
+    winners_count: Literal[1, 3, 5, 10] | None = None
 
 
 class QuestionOut(BaseModel):

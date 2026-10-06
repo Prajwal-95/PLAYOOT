@@ -69,6 +69,7 @@ async def create_quiz(
         title=payload.title.strip(),
         description=payload.description,
         source_type=payload.source_type,
+        winners_count=payload.winners_count,
     )
     session.add(quiz)
     await session.flush()
@@ -101,6 +102,8 @@ async def update_quiz(
         quiz.title = payload.title.strip()
     if payload.description is not None:
         quiz.description = payload.description
+    if payload.winners_count is not None:
+        quiz.winners_count = payload.winners_count
     if payload.questions is not None:
         await apply_questions(session, quiz, payload.questions)
     await session.commit()
