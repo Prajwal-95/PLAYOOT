@@ -446,38 +446,6 @@ export function PlayPage() {
                 </div>
               )}
 
-              {/* Answer Distribution */}
-              {reveal?.distribution && reveal.distribution.length > 0 && (
-                <div className="mt-6">
-                  <p className="text-sm text-gray-500 mb-3">Answer Distribution</p>
-                  <div className="space-y-2">
-                    {reveal.distribution.map((count, index) => (
-                      <div key={index} className="flex items-center gap-3">
-                        <span className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
-                          {String.fromCharCode(65 + index)}
-                        </span>
-                        <div className="flex-1 h-3 bg-gray-800 rounded-full overflow-hidden">
-                          <div 
-                            className={cn(
-                              "h-full rounded-full transition-all duration-500",
-                              index === reveal.correctIndex ? "bg-green-500" : "bg-purple-500"
-                            )}
-                            style={{
-                              width: `${
-                                (reveal.playerCount ?? 0) > 0
-                                  ? (count / (reveal.playerCount ?? 0)) * 100
-                                  : 0
-                              }%`,
-                            }}
-                          />
-                        </div>
-                        <span className="text-sm text-gray-400 w-12 text-right">{count}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
         {/* Leaderboard */}
         {/* Players never see scores: the host announces results. */}
         {isLeaderboard && (
