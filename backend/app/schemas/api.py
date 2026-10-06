@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.ai.base import MAX_QUESTIONS_PER_QUIZ
 from app.config import settings
 
 SourceType = Literal["topic", "pdf", "prompt", "manual"]
@@ -167,7 +168,7 @@ class GenerateQuizIn(BaseModel):
     topic: str | None = Field(default=None, max_length=300)
     prompt: str | None = Field(default=None, max_length=2000)
     title: str | None = Field(default=None, max_length=160)
-    question_count: int = Field(default=5, ge=1, le=20)
+    question_count: int = Field(default=5, ge=1, le=MAX_QUESTIONS_PER_QUIZ)
     question_types: list[Literal["multiple_choice", "multiple_answer", "fill_blank", "true_false"]] = Field(
         default_factory=lambda: ["multiple_choice"]
     )

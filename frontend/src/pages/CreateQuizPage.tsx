@@ -1,8 +1,27 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, GenerateQuizIn, GenerateQuizOut, QuestionIn } from "../services/api";
+import {
+  api,
+  clampInt,
+  GenerateQuizIn,
+  GenerateQuizOut,
+  MAX_GENERATED_QUESTIONS,
+  MAX_OPTION_COUNT,
+  MIN_GENERATED_QUESTIONS,
+  MIN_OPTION_COUNT,
+  OPTION_COUNTS,
+  POINTS_MAX,
+  POINTS_MIN,
+  POINTS_PRESETS,
+  QuestionIn,
+  TIMER_MAX,
+  TIMER_MIN,
+  TIMER_PRESETS,
+} from "../services/api";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { ScrollSelect } from "../components/ui/ScrollSelect";
+import { SelectWithCustom } from "../components/ui/SelectWithCustom";
 import { Card, CardContent } from "../components/ui/Card";
 import { CollapsibleSection } from "../components/ui/Collapsible";
 import { cn } from "../utils/cn";
@@ -47,6 +66,21 @@ export function CreateQuizPage() {
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+
+    // Mirror the backend bounds so a bad value never costs an AI round-trip.
+    if (questionCount < MIN_GENERATED_QUESTIONS || questionCount > MAX_GENERATED_QUESTIONS) {
+      setError(`Number of Questions must be between ${MIN_GENERATED_QUESTIONS} and ${MAX_GENERATED_QUESTIONS}.`);
+      return;
+    }
+    if (optionCount < MIN_OPTION_COUNT || optionCount > MAX_OPTION_COUNT) {
+      setError(`Options per Question must be between ${MIN_OPTION_COUNT} and ${MAX_OPTION_COUNT}.`);
+      return;
+    }
+    if (timeLimit < TIMER_MIN || timeLimit > TIMER_MAX) {
+      setError(`Time Limit must be between ${TIMER_MIN} and ${TIMER_MAX} seconds.`);
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -391,17 +425,28 @@ export function CreateQuizPage() {
               label="Number of Questions"
               type="number"
               value={questionCount}
-              onChange={(e) => setQuestionCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
-              min={1}
-              max={20}
+              onChange={(e) =>
+                setQuestionCount(
+                  clampInt(
+                    e.target.value,
+                    questionCount,
+                    MIN_GENERATED_QUESTIONS,
+                    MAX_GENERATED_QUESTIONS
+                  )
+                )
+              }
+              min={MIN_GENERATED_QUESTIONS}
+              max={MAX_GENERATED_QUESTIONS}
+              helperText={`${MIN_GENERATED_QUESTIONS}–${MAX_GENERATED_QUESTIONS} questions`}
             />
-            <Input
+            <ScrollSelect
               label="Options per Question"
-              type="number"
               value={optionCount}
-              onChange={(e) => setOptionCount(Math.max(2, Math.min(6, parseInt(e.target.value) || 2)))}
-              min={2}
-              max={6}
+              options={OPTION_COUNTS}
+              onChange={setOptionCount}
+              min={MIN_OPTION_COUNT}
+              max={MAX_OPTION_COUNT}
+              helperText="How many answer choices each question shows."
             />
           </div>
 
@@ -444,10 +489,15 @@ export function CreateQuizPage() {
           <label className="block text-sm font-medium text-gray-300 mb-3">Time Limit per Question</label>
           <SelectWithCustom
             value={timeLimit}
-            onChange={(v) => setTimeLimit(Math.max(1, Math.min(300, parseInt(v) || 20)))}
-            presets={[5, 10, 15, 20, 30, 60, 120, 180]}
+            onChange={(v) => setTimeLimit(clampInt(v, timeLimit, TIMER_MIN, TIMER_MAX))}
+            presets={TIMER_PRESETS}
             unit="sec"
+            min={TIMER_MIN}
+            max={TIMER_MAX}
           />
+          <p className="text-xs text-gray-500 mt-2">
+            Allowed range: {TIMER_MIN}–{TIMER_MAX} seconds.
+          </p>
         </CollapsibleSection>
 
         <CollapsibleSection
@@ -464,9 +514,11 @@ export function CreateQuizPage() {
           <label className="block text-sm font-medium text-gray-300 mb-3">Base Points per Question</label>
           <SelectWithCustom
             value={points}
-            onChange={(v) => setPoints(Math.max(0, Math.min(100000, parseInt(v) || 1000)))}
-            presets={[10, 20, 50, 100, 200, 500, 1000]}
+            onChange={(v) => setPoints(clampInt(v, points, POINTS_MIN, POINTS_MAX))}
+            presets={POINTS_PRESETS}
             unit="pts"
+            min={POINTS_MIN}
+            max={POINTS_MAX}
           />
         </CollapsibleSection>
 
@@ -540,64 +592,3 @@ export function CreateQuizPage() {
     </div>
   );
 }
-
-function SelectWithCustom({ value, onChange, presets, unit }: {
-  value: number;
-  onChange: (v: string) => void;
-  presets: number[];
-  unit: string;
-}) {
-  const [isCustom, setIsCustom] = useState(false);
-  const [customValue, setCustomValue] = useState("");
-
-  if (isCustom) {
-    return (
-      <div className="flex flex-wrap gap-2">
-        <input
-          type="number"
-          value={customValue || value}
-          onChange={(e) => {
-            const v = e.target.value;
-            setCustomValue(v);
-            onChange(v);
-          }}
-          min={1}
-          max={unit === "sec" ? 300 : 100000}
-          className="glass-input flex-1 min-w-[8rem] px-4 py-3 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-        />
-        <span className="flex items-center px-3 text-gray-400">{unit}</span>
-        <Button variant="ghost" size="sm" onClick={() => setIsCustom(false)}>
-          Use Preset
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {presets.map((p) => (
-        <button
-          key={p}
-          type="button"
-          onClick={() => {
-            setIsCustom(false);
-            onChange(String(p));
-          }}
-          className={cn(
-            "px-3.5 py-2 rounded-xl text-sm font-medium border-2 transition-all duration-200",
-            value === p
-              ? "border-transparent bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-playoot-sm"
-              : "border-white/10 bg-white/5 text-gray-300 hover:border-white/25 hover:bg-white/10"
-          )}
-        >
-          {p}
-          {unit}
-        </button>
-      ))}
-      <Button variant="outline" size="sm" onClick={() => setIsCustom(true)}>
-        Custom {unit}
-      </Button>
-    </div>
-  );
-}
-

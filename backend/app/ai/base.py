@@ -13,6 +13,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+#: Hard ceiling on how many questions a single generation request may ask
+#: for.  Enforced by ``GenerateQuizIn.question_count`` (``le=``) and by the
+#: PDF generation route's clamp, and mirrored on the frontend as
+#: ``MAX_GENERATED_QUESTIONS`` so the UI can never offer a value the API
+#: rejects.
+MAX_QUESTIONS_PER_QUIZ = 50
+
+#: The model is called in rounds of at most this many questions so a big
+#: request (up to ``MAX_QUESTIONS_PER_QUIZ``) never depends on one huge
+#: response that could hit ``max_tokens`` and come back truncated - which is
+#: how a request for 50 could otherwise silently come back as 10 or 20.
+MAX_QUESTIONS_PER_CALL = 10
+
 
 class QuizGenerationError(Exception):
     """Raised when generation cannot produce usable questions.

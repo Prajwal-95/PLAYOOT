@@ -1,5 +1,43 @@
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// ---------------------------------------------------------------------------
+// Shared quiz limits.
+//
+// These mirror the backend constraints exactly so CREATE QUIZ and EDIT QUIZ
+// can never drift apart, and so the UI cannot offer a value the API rejects:
+//   GenerateQuizIn.question_count  -> ge=1, le=50
+//   GenerateQuizIn.option_count    -> ge=2, le=6
+//   QuestionIn.time_limit          -> ge=5, le=300
+//   QuestionIn.points              -> ge=0, le=100000
+// ---------------------------------------------------------------------------
+
+/** Maximum questions the AI generator will accept (backend `le=50`). */
+export const MAX_GENERATED_QUESTIONS = 50;
+/** Minimum questions the AI generator will accept (backend `ge=1`). */
+export const MIN_GENERATED_QUESTIONS = 1;
+
+/** Supported answer options per question: 2..6 (backend `ge=2, le=6`). */
+export const OPTION_COUNTS = [2, 3, 4, 5, 6] as const;
+export const MIN_OPTION_COUNT = 2;
+export const MAX_OPTION_COUNT = 6;
+
+/** Timer presets - the SAME list for create and edit (seconds). */
+export const TIMER_PRESETS = [5, 10, 15, 20, 30, 60, 120, 180] as const;
+export const TIMER_MIN = 5;
+export const TIMER_MAX = 300;
+
+/** Base points per question - create and edit share this too. */
+export const POINTS_PRESETS = [10, 20, 50, 100, 200, 500, 1000] as const;
+export const POINTS_MIN = 0;
+export const POINTS_MAX = 100000;
+
+/** Clamp helper used by every numeric quiz field (never blanks the field). */
+export function clampInt(raw: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem("access_token");
   const headers: HeadersInit = {

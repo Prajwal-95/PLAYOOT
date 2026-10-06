@@ -1,8 +1,17 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, Quiz, QuestionOut } from "../services/api";
+import {
+  api,
+  clampInt,
+  Quiz,
+  QuestionOut,
+  TIMER_MAX,
+  TIMER_MIN,
+  TIMER_PRESETS,
+} from "../services/api";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { SelectWithCustom } from "../components/ui/SelectWithCustom";
 import {
   Card,
   CardHeader,
@@ -68,6 +77,35 @@ export function QuizViewPage() {
     }
   };
 
+  /**
+   * A card that is still being edited holds its changes in `editForm`,
+   * which is deliberately NOT part of `quiz.questions` until Save is
+   * pressed on that card. Anything that reads `quiz.questions` (above all
+   * "Save Changes" in the header) must call this first, otherwise every
+   * pending edit - including the timer - would be thrown away silently.
+   */
+  const commitPendingEdit = (
+    questions: QuestionOut[]
+  ): QuestionOut[] => {
+    if (editingIndex === null || !editForm) {
+      return questions;
+    }
+
+    const updated = [...questions];
+    const current = updated[editingIndex];
+    if (!current) return questions;
+
+    updated[editingIndex] = {
+      ...current,
+      ...editForm,
+      options: editForm.options.filter(
+        (o) => o.trim()
+      ),
+    } as QuestionOut;
+
+    return updated;
+  };
+
   const handleUpdateQuiz = async (
     e: React.FormEvent
   ) => {
@@ -75,15 +113,24 @@ export function QuizViewPage() {
 
     if (!quiz) return;
 
+    const questions = commitPendingEdit(
+      quiz.questions
+    );
+
     setSaving(true);
 
     try {
-      await api.updateQuiz(quiz.id, {
+      const saved = await api.updateQuiz(quiz.id, {
         title: quiz.title,
         description: quiz.description,
-        questions: quiz.questions,
+        questions,
         winners_count: winnersCount,
       });
+
+      // Re-sync from the server so the form shows exactly what persisted
+      // (fresh time_limit, points, ids, order_index) without a reload.
+      setEditingIndex(null);
+      if (saved) setQuiz(saved);
 
       setError("");
       alert("Quiz saved!");
@@ -846,27 +893,42 @@ function QuestionCard({
             )}
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-            <Input
-              label="Time Limit (s)"
-              type="number"
-              value={form.time_limit}
-              onChange={(e) =>
-                onTimeLimitChange(
-                  index,
-                  Math.max(
-                    5,
-                    Math.min(
-                      300,
-                      parseInt(
-                        e.target.value
-                      ) || 5
+            <div className="md:col-span-3">
+              <div className="flex items-center justify-between gap-3 mb-1.5">
+                <label className="block text-sm font-medium text-gray-300">
+                  Time Limit
+                </label>
+                <span
+                  data-testid="question-time-limit-value"
+                  className="text-xs font-semibold px-2.5 py-1 rounded-full bg-cyan-500/20 text-cyan-200 border border-cyan-400/30 tabular-nums"
+                >
+                  {form.time_limit}s
+                </span>
+              </div>
+
+              {/* Same control (and the same preset values) as CREATE QUIZ. */}
+              <SelectWithCustom
+                value={form.time_limit}
+                onChange={(v) =>
+                  onTimeLimitChange(
+                    index,
+                    clampInt(
+                      v,
+                      form.time_limit,
+                      TIMER_MIN,
+                      TIMER_MAX
                     )
                   )
-                )
-              }
-              min={5}
-              max={300}
-            />
+                }
+                presets={TIMER_PRESETS}
+                unit="sec"
+                min={TIMER_MIN}
+                max={TIMER_MAX}
+              />
+              <p className="text-xs text-gray-500 mt-1.5">
+                Allowed range: {TIMER_MIN}–{TIMER_MAX} seconds.
+              </p>
+            </div>
 
             <Input
               label="Points"
@@ -890,7 +952,7 @@ function QuestionCard({
               max={100000}
             />
 
-            <div className="md:col-span-3">
+            <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-300 mb-1">
                 Explanation
               </label>

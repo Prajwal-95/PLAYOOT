@@ -220,7 +220,7 @@ def test_generate_requires_prompt_for_prompt_source(client, host, install_genera
     "field,value",
     [
         ("question_count", 0),
-        ("question_count", 21),
+        ("question_count", 51),
         ("option_count", 1),
         ("option_count", 7),
         ("time_limit", 1),

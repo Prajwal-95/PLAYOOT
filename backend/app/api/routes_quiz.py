@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import QuizGenerationError, get_quiz_generator
-from app.ai.base import GenerationRequest
+from app.ai.base import GenerationRequest, MAX_QUESTIONS_PER_QUIZ
 from app.ai.groq_generator import extract_text_from_pdf
 from app.api.deps import get_current_user, limit_user_and_ip
 from app.database import get_session
@@ -180,6 +180,7 @@ _SAFE_GENERATION_MESSAGES: dict[str, str] = {
     "AI_PROVIDER_ERROR": "The AI provider could not be reached. Please try again.",
     "AI_NO_VALID_QUESTIONS": "The model did not return any usable questions. Try rephrasing the topic.",
     "AI_BAD_RESPONSE": "The AI provider returned an unusable response. Please try again.",
+    "AI_INCOMPLETE": "The AI returned fewer questions than requested. Please try again.",
     "AI_GENERATION_FAILED": "The quiz could not be generated. Please try again.",
     "PDF_ENCRYPTED": "That PDF is password protected.",
     "PDF_UNREADABLE": "That file could not be read as a PDF.",
@@ -254,6 +255,20 @@ async def generate_quiz_from_pdf(
     _rl: None = Depends(limit_user_and_ip("ai.pdf.user", "ai.pdf.ip")),
 ) -> dict:
     """PDF -> text -> questions.  The uploaded bytes never leave the server."""
+    # Enforce the same question-count bounds as GenerateQuizIn: the PDF form
+    # path must never accept a count the JSON /generate path would reject.
+    count = int(question_count)
+    if count < 1 or count > MAX_QUESTIONS_PER_QUIZ:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "OUT_OF_RANGE",
+                "message": (
+                    f"question_count must be between 1 and {MAX_QUESTIONS_PER_QUIZ}."
+                ),
+            },
+        )
+
     raw = await file.read()
     if not raw:
         raise HTTPException(
@@ -270,7 +285,7 @@ async def generate_quiz_from_pdf(
     
     request = GenerationRequest(
         source_type="pdf",
-        question_count=max(1, min(int(question_count), 20)),
+        question_count=count,
         question_types=parsed_types,
         option_count=max(2, min(int(option_count), 6)),
         difficulty=difficulty,

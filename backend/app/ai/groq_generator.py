@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 from app.ai.base import (
     GeneratedQuestion,
     GenerationRequest,
+    MAX_QUESTIONS_PER_CALL,
     QuizGenerationError,
     QuizGenerator,
     build_system_prompt,
@@ -93,6 +95,28 @@ class GroqQuizGenerator(QuizGenerator):
 
         raise last_exc if last_exc else RuntimeError("unreachable")
 
+    async def _complete(self, client, messages: list[dict]) -> str:
+        """One model call -> raw assistant content, with the json-mode fallback."""
+        try:
+            completion = await self._create_completion(
+                client, messages, use_json_mode=True
+            )
+        except Exception as exc:
+            # Only a 400 means "this model rejected response_format". Every
+            # other failure (auth, not-found, transient-after-retries) must
+            # surface immediately - retrying it just burns another call.
+            if type(exc).__name__ != "BadRequestError":
+                raise
+            # Some models reject response_format - retry once in plain mode.
+            logger.info(
+                "Groq json_object mode unavailable (%s), retrying without it",
+                type(exc).__name__,
+            )
+            completion = await self._create_completion(
+                client, messages, use_json_mode=False
+            )
+        return (completion.choices[0].message.content or "") if completion.choices else ""
+
     async def generate(self, request: GenerationRequest) -> list[GeneratedQuestion]:
         # imported lazily so a missing optional dependency cannot break startup
         try:
@@ -103,30 +127,69 @@ class GroqQuizGenerator(QuizGenerator):
                 code="AI_NOT_CONFIGURED",
             ) from exc
 
-        messages = [
-            {"role": "system", "content": build_system_prompt(request)},
-            {"role": "user", "content": build_user_prompt(request)},
-        ]
+        target = max(1, int(request.question_count))
         client = AsyncGroq(api_key=self._api_key, timeout=self._timeout)
+
+        collected: list[GeneratedQuestion] = []
+        seen: set[str] = set()
+
+        # Request in rounds of at most MAX_QUESTIONS_PER_CALL so one big answer
+        # never has to fit inside a single response (which would be truncated at
+        # max_tokens and silently return fewer questions than were asked for).
+        # The extra two rounds let us recover from a short or unusable batch.
+        rounds_needed = (target + MAX_QUESTIONS_PER_CALL - 1) // MAX_QUESTIONS_PER_CALL
+        max_rounds = rounds_needed + 2
+
         try:
-            try:
-                completion = await self._create_completion(
-                    client, messages, use_json_mode=True
+            for _ in range(max_rounds):
+                if len(collected) >= target:
+                    break
+
+                remaining = target - len(collected)
+                chunk = replace(
+                    request, question_count=min(remaining, MAX_QUESTIONS_PER_CALL)
                 )
-            except Exception as exc:
-                # Only a 400 means "this model rejected response_format". Every
-                # other failure (auth, not-found, transient-after-retries) must
-                # surface immediately - retrying it just burns another call.
-                if type(exc).__name__ != "BadRequestError":
-                    raise
-                # Some models reject response_format - retry once in plain mode.
-                logger.info(
-                    "Groq json_object mode unavailable (%s), retrying without it",
-                    type(exc).__name__,
-                )
-                completion = await self._create_completion(
-                    client, messages, use_json_mode=False
-                )
+                messages = [
+                    {"role": "system", "content": build_system_prompt(chunk)},
+                    {"role": "user", "content": build_user_prompt(chunk)},
+                ]
+                if collected:
+                    # Tell the model what it already produced so later rounds
+                    # add NEW questions instead of repeats (repeats would be
+                    # dropped, leaving us short of the requested count).
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "Already covered - write DIFFERENT questions:\n- "
+                            + "\n- ".join(
+                                q.question_text for q in collected[-40:]
+                            ),
+                        }
+                    )
+
+                content = await self._complete(client, messages)
+
+                try:
+                    batch = normalise_questions(extract_json(content), chunk)
+                except QuizGenerationError as exc:
+                    if not collected:
+                        raise
+                    # First round failed as-is: report it unchanged. A later
+                    # round failing is recoverable - keep asking for the
+                    # remainder rather than throwing away what we already have.
+                    logger.warning(
+                        "groq round discarded (%s): %s", exc.code, exc.message
+                    )
+                    continue
+
+                for question in batch:
+                    key = question.question_text.strip().lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    collected.append(question)
+                    if len(collected) >= target:
+                        break
         except QuizGenerationError:
             raise
         except Exception as exc:
@@ -136,16 +199,22 @@ class GroqQuizGenerator(QuizGenerator):
                 code="AI_PROVIDER_ERROR",
             ) from exc
 
-        content = (completion.choices[0].message.content or "") if completion.choices else ""
-        payload = extract_json(content)
-        questions = normalise_questions(payload, request)
+        if len(collected) < target:
+            # Never silently return a shorter quiz than was asked for.
+            raise QuizGenerationError(
+                f"The AI returned {len(collected)} of the {target} questions "
+                "requested. Please try again.",
+                code="AI_INCOMPLETE",
+            )
+
         logger.info(
-            "groq generated %d/%d questions (model=%s)",
-            len(questions),
-            request.question_count,
+            "groq generated %d/%d questions (model=%s, rounds=%d)",
+            len(collected),
+            target,
             self._model,
+            rounds_needed,
         )
-        return questions
+        return collected
 
 
 def extract_text_from_pdf(data: bytes, *, max_chars: int = 40_000) -> str:
