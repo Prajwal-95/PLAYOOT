@@ -112,7 +112,17 @@ class ConnectionManager:
         exclude_player_id: int | None = None,
         include_hosts: bool = True,
     ) -> int:
-        """Fan an event out to a room.  Dead sockets are pruned afterwards."""
+        """Fan an event out to a room.  Dead sockets are pruned afterwards.
+
+        Player sockets receive a scoreboard-free version of the payload (see
+        ``sanitize_event_for_player``); the host always receives the full
+        payload.  Score privacy is enforced here, not with CSS.
+        """
+        from app.game.serializer import sanitize_event_for_player
+
+        event_name = (
+            event_type.value if isinstance(event_type, WSEventType) else str(event_type)
+        )
         targets = [
             c
             for c in list(self._rooms.get(game_pin, {}).values())
@@ -121,8 +131,18 @@ class ConnectionManager:
         ]
         if not targets:
             return 0
+
+        async def _send_one(c: Connection) -> bool:
+            body = payload
+            if not c.is_host:
+                safe = sanitize_event_for_player(event_name, payload)
+                if safe is False:
+                    return True  # host-only event: nothing to send, not a failure
+                body = safe  # type: ignore[assignment]
+            return await self.send(c, event_type, body)
+
         results = await asyncio.gather(
-            *(self.send(c, event_type, payload) for c in targets),
+            *(_send_one(c) for c in targets),
             return_exceptions=True,
         )
         delivered = 0

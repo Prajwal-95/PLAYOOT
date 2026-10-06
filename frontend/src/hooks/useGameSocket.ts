@@ -53,6 +53,7 @@ interface UseGameSocketReturn {
   me: Player | null;
   canStart: boolean;
   serverTime: string | null;
+  hasMoreQuestions: boolean;
 
   // Actions
   sendAction: (
@@ -155,6 +156,48 @@ export function useGameSocket({
   const [serverTime, setServerTime] =
     useState<string | null>(null);
 
+  // Local projection of the backend's authoritative `question_ends_at`.
+  // This is display-only: the backend closes the question on its own timer.
+  const [deadline, setDeadline] = useState<number | null>(null);
+
+  // Whether another question follows the one currently on screen.
+  const [hasMoreQuestions, setHasMoreQuestions] = useState(true);
+
+  // ---------------------------------------------------------
+  // SERVER-AUTHORITATIVE DEADLINE
+  // ---------------------------------------------------------
+
+  // The backend owns question timing.  All this does is turn the server's own
+  // `endsAt`/`serverTime` pair into a local wall-clock deadline, so a skewed
+  // device clock cannot make the host disagree with the backend about when a
+  // question is over.
+  const syncDeadline = useCallback(
+    (endsAt: string | null, serverTimeIso: string | null) => {
+      if (!endsAt) {
+        setDeadline(null);
+        return;
+      }
+
+      const endsMs = Date.parse(endsAt);
+
+      if (!Number.isFinite(endsMs)) {
+        setDeadline(null);
+        return;
+      }
+
+      const serverMs = serverTimeIso
+        ? Date.parse(serverTimeIso)
+        : NaN;
+
+      setDeadline(
+        Number.isFinite(serverMs)
+          ? Date.now() + Math.max(0, endsMs - serverMs)
+          : endsMs
+      );
+    },
+    []
+  );
+
   // ---------------------------------------------------------
   // MESSAGE HANDLER
   // ---------------------------------------------------------
@@ -222,6 +265,12 @@ export function useGameSocket({
           setCanStart(p.canStart);
           setServerTime(p.serverTime);
 
+          // Resync the display countdown to the authoritative deadline.
+          syncDeadline(p.questionEndsAt, p.serverTime);
+          setHasMoreQuestions(
+            p.game.currentQuestionNumber < p.game.totalQuestions
+          );
+
           break;
         }
 
@@ -268,6 +317,30 @@ export function useGameSocket({
 
           setAlreadyAnswered(false);
           setMyResult(null);
+
+          // Timing is taken verbatim from the backend's question payload.
+          setQuestionStartedAt(p.startedAt);
+          setQuestionEndsAt(p.endsAt);
+          setServerTime(p.serverTime);
+          setTimeRemainingMs(p.timeRemainingMs);
+          syncDeadline(p.endsAt, p.serverTime);
+
+          // A new question re-opens answering and re-syncs progress.
+          setHasMoreQuestions(
+            p.questionNumber < p.totalQuestions
+          );
+
+          setGame((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  state: GameState.QUESTION_ACTIVE,
+                  currentQuestionIndex: p.questionNumber - 1,
+                  currentQuestionNumber: p.questionNumber,
+                  totalQuestions: p.totalQuestions,
+                }
+              : prev
+          );
 
           break;
         }
@@ -320,6 +393,15 @@ export function useGameSocket({
 
           setReveal(p.reveal);
           setLeaderboard(p.leaderboard);
+          setHasMoreQuestions(p.hasMoreQuestions);
+
+          // The backend closed the question, so the local countdown is done.
+          setTimeRemainingMs(0);
+          setDeadline(null);
+
+          setGame((prev) =>
+            prev ? { ...prev, state: p.state } : prev
+          );
 
           setCurrentQuestion((prev) =>
             prev
@@ -347,6 +429,11 @@ export function useGameSocket({
 
           setLeaderboard(p.leaderboard);
           setReveal(p.reveal);
+          setHasMoreQuestions(p.hasMoreQuestions);
+
+          setGame((prev) =>
+            prev ? { ...prev, state: p.state } : prev
+          );
 
           break;
         }
@@ -356,10 +443,15 @@ export function useGameSocket({
         // ---------------------------------------------------
 
         case WSEventType.NEXT_QUESTION: {
+          // Clear current question state to prepare for the next question.
+          // The next QUESTION_STARTED will repopulate everything.
           setCurrentQuestion(null);
           setReveal(null);
           setAlreadyAnswered(false);
           setMyResult(null);
+          setTimeRemainingMs(null);
+          setDeadline(null);
+          // hasMoreQuestions will be updated by the next QUESTION_STARTED
 
           break;
         }
@@ -493,7 +585,7 @@ export function useGameSocket({
         }
       }
     },
-    [onError]
+    [onError, syncDeadline]
   );
 
   // ---------------------------------------------------------
@@ -965,6 +1057,37 @@ export function useGameSocket({
   ]);
 
   // ---------------------------------------------------------
+  // COUNTDOWN DISPLAY
+  // ---------------------------------------------------------
+
+  // Purely cosmetic: the backend finalises the question on its own timer no
+  // matter what this does.  Re-runs whenever the deadline moves (each
+  // STATE_SYNC / QUESTION_STARTED).
+  useEffect(() => {
+    if (deadline === null) {
+      setTimeRemainingMs(null);
+      return;
+    }
+
+    const tick = () => {
+      const remaining = Math.max(0, deadline - Date.now());
+      setTimeRemainingMs(remaining);
+      // Stop the interval when deadline passes to avoid stale updates
+      if (remaining === 0) {
+        window.clearInterval(interval);
+      }
+    };
+
+    tick();
+
+    const interval = window.setInterval(tick, 100);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [deadline]);
+
+  // ---------------------------------------------------------
   // CONNECT ON MOUNT / INPUT CHANGE
   // ---------------------------------------------------------
 
@@ -1042,6 +1165,7 @@ export function useGameSocket({
     me,
     canStart,
     serverTime,
+    hasMoreQuestions,
 
     // Actions
     sendAction,

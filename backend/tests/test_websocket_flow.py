@@ -82,7 +82,10 @@ def test_player_socket_after_host_socket_is_already_connected(client, host, game
 
 
 def test_player_socket_state_sync_lists_the_player(client, host, game):
-    """The snapshot the player receives must contain their own roster entry."""
+    """The snapshot the player receives must contain their own roster entry.
+
+    Players never receive scoreboard data - leaderboard is None and all scores are 0.
+    """
     pin = game["game_pin"]
     session = join(client, game, "Ada")
     player_id = session["player"]["player_id"]
@@ -93,9 +96,12 @@ def test_player_socket_state_sync_lists_the_player(client, host, game):
         recv_until(ws, "CONNECTED")
         state = recv_until(ws, "STATE_SYNC")["payload"]
         assert [p["playerId"] for p in state["players"]] == [player_id]
+        # Player scores are sanitized to 0
+        assert state["players"][0]["score"] == 0
         assert state["alreadyAnswered"] is False
         assert state["myResult"] is None
-        assert state["leaderboard"]["entries"][0]["name"] == "Ada"
+        # Leaderboard is never sent to players
+        assert state["leaderboard"] is None
 
 
 def test_player_socket_rejects_token_for_a_different_game(client, host, game, quiz):
@@ -379,18 +385,26 @@ def test_host_to_final_results(client, game, seated):
             assert ack["answeredCount"] == 1
 
             # everyone answered -> the question closes itself
+            # Player receives QUESTION_ENDED (sanitized: no leaderboard, reveal without results)
             ended = recv_until(player_ws, "QUESTION_ENDED")
             assert ended["payload"]["questionId"] == q1["questionId"]
-            board = recv_until(player_ws, "LEADERBOARD_UPDATED")["payload"]
+            assert "leaderboard" not in ended["payload"] or ended["payload"]["leaderboard"] is None
+            # Player does NOT receive LEADERBOARD_UPDATED (host-only event)
+            # Host receives LEADERBOARD_UPDATED
+            board = recv_until(host_ws, "LEADERBOARD_UPDATED")["payload"]
             top = board["leaderboard"]["entries"][0]
             assert top["name"] == "Ada"
             assert top["score"] > 0
 
             # advance, then finish
             send(host_ws, "NEXT_QUESTION")
-            q2 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
-            assert q2["questionNumber"] == 2
-            assert q2["questionId"] != q1["questionId"]
+            # Player receives next QUESTION_STARTED
+            q2_player = recv_until(player_ws, "QUESTION_STARTED")["payload"]
+            assert q2_player["questionNumber"] == 2
+            # Host receives next QUESTION_STARTED
+            q2_host = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+            assert q2_host["questionNumber"] == 2
+            assert q2_host["questionId"] != q1["questionId"]
 
             send(host_ws, "END_GAME")
             recv_until(host_ws, "GAME_FINISHED")
@@ -586,3 +600,258 @@ def test_answer_is_graded_by_the_server_not_the_client(client, game, seated):
     ada = results["individualLeaderboard"][0]
     assert ada["score"] < 999999  # wrong answer => 0
     assert ada["score"] == 0
+
+
+# ===========================================================================
+# Kahoot-style gameplay contract
+#
+# Host/player split: the host drives the quiz with a visible question + four
+# options + an authoritative timer + Next Question, the player only ever
+# answers, and the backend owns every transition.
+# ===========================================================================
+
+
+def test_host_receives_question_options_timer_and_response_counts(client, seated):
+    """Checklist 1-5: host starts -> Q1 -> text + 4 options + timer state."""
+    pin = seated["pin"]
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+
+            send(host_ws, "START_GAME")
+            started = recv_until(host_ws, "GAME_STARTED")["payload"]
+            assert started["totalQuestions"] == 2
+
+            q1 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+
+            # 2. question 1 is active
+            assert q1["questionNumber"] == 1
+            assert q1["totalQuestions"] == 2
+
+            # 3. host sees the question
+            assert q1["question"] == "Capital of France?"
+
+            # 4. host sees exactly four options
+            assert len(q1["options"]) == 4
+            assert q1["options"] == ["Paris", "Rome", "Berlin", "Madrid"]
+
+            # 5. authoritative timer state is present and sane
+            assert q1["timeLimit"] == 5
+            assert 0 < q1["timeRemainingMs"] <= q1["timeLimit"] * 1000
+            assert q1["startedAt"] and q1["endsAt"] and q1["serverTime"]
+            assert q1["endsAt"] > q1["startedAt"]
+
+            # response counts reach the host while the question is live
+            send(player_ws, "SUBMIT_ANSWER", {"questionId": q1["questionId"], "answer": 0})
+            recv_until(player_ws, "ANSWER_SUBMITTED")
+            answered = recv_until(host_ws, "PLAYER_ANSWERED")["payload"]
+            assert answered["answeredCount"] == 1
+            assert answered["playerCount"] == 1
+
+
+def test_player_gets_a_playable_answer_state_but_never_the_answer(client, seated):
+    """Checklist 6-7: the player receives four options and no correct answer."""
+    pin = seated["pin"]
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+
+            send(host_ws, "START_GAME")
+            q1 = recv_until(player_ws, "QUESTION_STARTED")["payload"]
+
+            # playable: four options, an id to answer against, a live clock
+            assert len(q1["options"]) == 4
+            assert q1["questionId"]
+            assert q1["timeRemainingMs"] > 0
+
+            # fair play: nothing that discloses the answer pre-reveal
+            for leaked in ("correctAnswer", "correctIndex", "explanation"):
+                assert leaked not in q1, f"{leaked} leaked to a live player"
+
+            # the client cannot re-request it either
+            send(player_ws, "REQUEST_STATE")
+            sync = recv_until(player_ws, "STATE_SYNC")["payload"]
+            assert "correctIndex" not in sync["currentQuestion"]
+            assert sync["reveal"] is None
+
+
+
+def test_player_submits_exactly_one_answer_per_question(client, game, seated):
+    """Checklist 8: one tap locks the choice; a second attempt is refused."""
+    pin = seated["pin"]
+    # A second seat keeps the question open after the first answer lands.
+    bob_token = join(client, game, "Bob")["player_token"]
+
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+            with client.websocket_connect(f"/ws/game/{pin}?player_token={bob_token}") as bob_ws:
+                bob_ws.receive_json()
+
+                send(host_ws, "START_GAME")
+                q1 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+
+                send(player_ws, "SUBMIT_ANSWER", {"questionId": q1["questionId"], "answer": 0})
+                ack = recv_until(player_ws, "ANSWER_SUBMITTED")["payload"]
+                assert ack["accepted"] is True
+
+                send(player_ws, "SUBMIT_ANSWER", {"questionId": q1["questionId"], "answer": 3})
+                assert (
+                    recv_until(player_ws, "GAME_ERROR")["payload"]["code"]
+                    == "ALREADY_ANSWERED"
+                )
+
+
+def test_server_timer_expires_and_then_rejects_late_answers(client, seated):
+    """Checklist 9: the backend closes the question when the clock runs out."""
+    pin = seated["pin"]
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+
+            send(host_ws, "START_GAME")
+            q1 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+
+            # nobody answers, so only the authoritative timer can close it
+            ended = recv_until(host_ws, "QUESTION_ENDED", limit=60)["payload"]
+            assert ended["reason"] == "timer"
+            assert ended["state"] == "QUESTION_REVEAL"
+            assert ended["hasMoreQuestions"] is True
+
+            # the reveal is the first point at which the answer is disclosed
+            assert ended["reveal"]["correctIndex"] == 0
+            assert ended["reveal"]["correctAnswer"] == "Paris"
+
+            # a late tap is refused - the question is fully closed now, so the
+            # engine is past ANSWERABLE_STATES entirely
+            send(player_ws, "SUBMIT_ANSWER", {"questionId": q1["questionId"], "answer": 1})
+            assert (
+                recv_until(player_ws, "GAME_ERROR")["payload"]["code"]
+                == "NO_ACTIVE_QUESTION"
+            )
+
+
+
+def test_host_next_question_advances_to_q2_and_resets_the_timer(client, seated):
+    """Checklist 10-14: Next Question -> Q2 -> fresh options + fresh clock."""
+    pin = seated["pin"]
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+
+            send(host_ws, "START_GAME")
+            q1 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+            # drain Q1 on the player socket so the next read is Q2's frame
+            assert recv_until(player_ws, "QUESTION_STARTED")["payload"][
+                "questionNumber"
+            ] == 1
+
+            # 10. the host drives progression over the wire, not via React state
+            send(host_ws, "NEXT_QUESTION")
+
+            # 11-12. the old question closes, then Q2 opens for the host
+            ended = recv_until(host_ws, "QUESTION_ENDED")["payload"]
+            assert ended["state"] == "QUESTION_REVEAL"
+            board = recv_until(host_ws, "LEADERBOARD_UPDATED")["payload"]
+            assert board["state"] == "LEADERBOARD"
+
+            advanced = recv_until(host_ws, "NEXT_QUESTION")["payload"]
+            assert advanced["nextQuestionIndex"] == 1
+            assert advanced["totalQuestions"] == 2
+
+            q2 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+            assert q2["questionNumber"] == 2
+            assert q2["questionId"] != q1["questionId"]
+            assert q2["question"] == "2 + 2 = ?"
+
+            # 13. the player receives the new four options
+            player_q2 = recv_until(player_ws, "QUESTION_STARTED")["payload"]
+            assert player_q2["questionId"] == q2["questionId"]
+            assert player_q2["options"] == ["3", "4", "5", "6"]
+            assert "correctAnswer" not in player_q2
+            assert "correctIndex" not in player_q2
+
+            # 14. the timer resets to a full clock
+            assert 0 < player_q2["timeRemainingMs"] <= player_q2["timeLimit"] * 1000
+            assert player_q2["startedAt"] != q1["startedAt"]
+            assert player_q2["endsAt"] > q1["endsAt"]
+
+
+
+def test_final_question_transitions_to_results(client, seated):
+    """Checklist 15: after the last question the game reaches FINISHED."""
+    pin = seated["pin"]
+    with client.websocket_connect(f"/ws/game/{pin}?token={seated['host_token']}") as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect(
+            f"/ws/game/{pin}?player_token={seated['player_token']}"
+        ) as player_ws:
+            player_ws.receive_json()
+
+            send(host_ws, "START_GAME")
+            recv_until(host_ws, "QUESTION_STARTED")
+
+            # question 1 of 2 -> question 2 of 2
+            send(host_ws, "NEXT_QUESTION")
+            q2 = recv_until(host_ws, "QUESTION_STARTED")["payload"]
+            assert q2["questionNumber"] == 2
+
+            # question 2 of 2 -> finished
+            send(host_ws, "NEXT_QUESTION")
+            recv_until(host_ws, "QUESTION_ENDED")
+            finished = recv_until(host_ws, "GAME_FINISHED", limit=60)["payload"]
+            assert finished["reason"] == "completed"
+
+            # the player lands on the same terminal state
+            player_seen = recv_until(player_ws, "GAME_FINISHED", limit=60)
+            assert player_seen["payload"]["reason"] == "completed"
+
+            # a further advance must not resurrect the quiz
+            send(host_ws, "NEXT_QUESTION")
+            send(host_ws, "REQUEST_STATE")
+            sync = recv_until(host_ws, "STATE_SYNC", limit=60)["payload"]
+            assert sync["game"]["state"] == "FINISHED"
+
+
+def test_player_stage_never_renders_the_question_text():
+    """Checklist 7 (render side): the phone UI shows buttons, not the question.
+
+    The question text belongs to the HOST stage only.  This source-level guard
+    stops a future edit from quietly putting it back on the player screen.
+    """
+    from pathlib import Path
+
+    pages = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages"
+    play = pages / "PlayPage.tsx"
+    if not play.exists():
+        pytest.skip("frontend sources are not available in this checkout")
+
+    source = play.read_text(encoding="utf-8")
+    for interpolation in (
+        "{displayQuestion.question}",
+        "{currentQuestion?.question}",
+        "{question.question}",
+    ):
+        assert interpolation not in source, (
+            f"PlayPage must not render the question text (found {interpolation})"
+        )
+
+    # ...while the host stage must show it.
+    panel = pages.parent / "components" / "game" / "HostGamePanel.tsx"
+    assert panel.exists(), "host gameplay stage is missing"
+    assert "{question.question}" in panel.read_text(encoding="utf-8")

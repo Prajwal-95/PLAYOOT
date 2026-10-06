@@ -111,6 +111,7 @@ def _team_name(engine: "GameEngine", team_id: int | None) -> str | None:
 
 
 def player_payload(player: LivePlayer, engine: "GameEngine") -> dict[str, Any]:
+    """Full player payload including score - for host only."""
     return {
         "playerId": player.id,
         "nickname": player.nickname,
@@ -123,7 +124,22 @@ def player_payload(player: LivePlayer, engine: "GameEngine") -> dict[str, Any]:
     }
 
 
+def player_payload_safe(player: LivePlayer, engine: "GameEngine") -> dict[str, Any]:
+    """Player payload WITHOUT real score (score=0) - for player sockets."""
+    return {
+        "playerId": player.id,
+        "nickname": player.nickname,
+        "score": 0,
+        "connected": player.connected,
+        "teamId": player.team_id,
+        "teamName": _team_name(engine, player.team_id),
+        "joinedAt": iso(player.joined_at),
+        "hasAnswered": player.id in engine.answered,
+    }
+
+
 def team_payload(team: LiveTeam, engine: "GameEngine") -> dict[str, Any]:
+    """Full team payload including score and member scores - for host only."""
     return {
         "teamId": team.id,
         "name": team.name,
@@ -133,6 +149,24 @@ def team_payload(team: LiveTeam, engine: "GameEngine") -> dict[str, Any]:
         "isFull": team.member_count >= settings.max_team_size,
         "members": [
             player_payload(engine.players[pid], engine)
+            for pid in team.member_ids
+            if pid in engine.players
+        ],
+        "createdAt": iso(team.created_at),
+    }
+
+
+def team_payload_safe(team: LiveTeam, engine: "GameEngine") -> dict[str, Any]:
+    """Team payload WITHOUT score and WITHOUT member scores - for player sockets."""
+    return {
+        "teamId": team.id,
+        "name": team.name,
+        "score": 0,
+        "memberCount": team.member_count,
+        "maxSize": settings.max_team_size,
+        "isFull": team.member_count >= settings.max_team_size,
+        "members": [
+            player_payload_safe(engine.players[pid], engine)
             for pid in team.member_ids
             if pid in engine.players
         ],
@@ -287,7 +321,14 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
     A reconnecting player gets their score, team, current question, the
     authoritative deadline and whether they already answered - all from the
     server, never from local storage.
+
+    When `for_player_id` is provided, the payload is sanitized for a player socket:
+    - No scores in player/team objects
+    - No leaderboard
+    - myResult excludes pointsAwarded
+    - me excludes score
     """
+    is_player = for_player_id is not None
     question = engine.current_question
     if question is None:
         current_question = None
@@ -298,9 +339,9 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
         base = question_payload(engine) or {}
         current_question = {**base, "correctIndex": question.correct_index}
 
-    already_answered = for_player_id is not None and for_player_id in engine.answered
+    already_answered = is_player and for_player_id in engine.answered
     my_result = None
-    if for_player_id is not None and already_answered:
+    if is_player and already_answered:
         record = engine.answered[for_player_id]
         my_result = {
             "selectedAnswer": record.selected_answer,
@@ -309,14 +350,16 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
                 None if engine.state.value == "QUESTION_ACTIVE" else record.is_correct
             ),
             "responseTimeMs": record.response_time_ms,
-            "pointsAwarded": (
-                0 if engine.state.value == "QUESTION_ACTIVE" else record.points_awarded
-            ),
+            # pointsAwarded is never sent to players
         }
 
     me = None
-    if for_player_id is not None and for_player_id in engine.players:
-        me = player_payload(engine.players[for_player_id], engine)
+    if is_player and for_player_id in engine.players:
+        me = player_payload_safe(engine.players[for_player_id], engine)
+
+    # Choose payload builders based on role
+    player_builder = player_payload_safe if is_player else player_payload
+    team_builder = team_payload_safe if is_player else team_payload
 
     return {
         "game": {
@@ -335,13 +378,13 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
             "startedAt": iso(engine.started_at),
         },
         "players": [
-            player_payload(p, engine)
+            player_builder(p, engine)
             for p in sorted(
                 engine.players.values(), key=lambda p: (iso(p.joined_at) or "", p.id)
             )
         ],
         "teams": [
-            team_payload(t, engine)
+            team_builder(t, engine)
             for t in sorted(
                 engine.teams.values(), key=lambda t: (iso(t.created_at) or "", t.id)
             )
@@ -352,7 +395,7 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
             if engine.state.value in {"QUESTION_REVEAL", "LEADERBOARD"}
             else None
         ),
-        "leaderboard": leaderboard_payload(engine),
+        "leaderboard": None if is_player else leaderboard_payload(engine),
         "timeRemainingMs": engine.time_remaining_ms(),
         "questionStartedAt": iso(engine.question_started_at),
         "questionEndsAt": iso(engine.question_ends_at),
@@ -362,3 +405,67 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
         "canStart": engine.can_start(),
         "serverTime": iso(utcnow()),
     }
+
+
+def _player_safe_reveal(reveal: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reveal for players: correct answer + distribution, no per-player scores."""
+    if not isinstance(reveal, dict):
+        return reveal
+    safe = dict(reveal)
+    # `results` carries totalScore/pointsAwarded per player - host only.
+    safe.pop("results", None)
+    return safe
+
+
+def sanitize_event_for_player(
+    event_type: str, payload: dict[str, Any] | None
+) -> dict[str, Any] | None | bool:
+    """Return the player-safe version of a broadcast payload.
+
+    Returns ``False`` when the event should not be sent to players at all
+    (leaderboard refreshes are host-only; players wait on the reveal).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if event_type == "LEADERBOARD_UPDATED":
+        return False
+    if event_type == "QUESTION_ENDED":
+        safe = dict(payload)
+        safe.pop("leaderboard", None)
+        safe["reveal"] = _player_safe_reveal(payload.get("reveal"))
+        return safe
+    if event_type in ("GAME_FINISHED", "GAME_CANCELLED"):
+        safe = dict(payload)
+        safe.pop("leaderboard", None)
+        safe.pop("finalLeaderboard", None)
+        return safe
+    if event_type in (
+        "PLAYER_JOINED",
+        "PLAYER_LEFT",
+        "PLAYER_UPDATED",
+        "TEAM_CREATED",
+        "TEAM_JOINED",
+        "TEAM_LEFT",
+        "TEAM_UPDATED",
+        "GAME_STARTED",
+    ):
+        lobby = payload.get("lobby")
+        if isinstance(lobby, dict):
+            safe = dict(payload)
+            lobby_safe = dict(lobby)
+            lobby_safe["players"] = [
+                {**p, "score": 0} for p in lobby.get("players", []) or []
+            ]
+            teams_safe = []
+            for t in lobby.get("teams", []) or []:
+                tq = dict(t)
+                tq["score"] = 0
+                tq["members"] = [
+                    {**m, "score": 0} for m in tq.get("members", []) or []
+                ]
+                teams_safe.append(tq)
+            lobby_safe["teams"] = teams_safe
+            safe["lobby"] = lobby_safe
+            return safe
+        return payload
+    return payload

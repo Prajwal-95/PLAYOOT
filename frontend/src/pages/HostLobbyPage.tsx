@@ -16,7 +16,8 @@ import {
   CardContent,
 } from "../components/ui/Card";
 import { cn } from "../utils/cn";
-import { Player, Team } from "../types/game";
+import { Player, Team, GameState } from "../types/game";
+import { HostGamePanel } from "../components/game/HostGamePanel";
 
 export function HostLobbyPage() {
   const { quizId, gamePin } = useParams<{
@@ -42,15 +43,39 @@ export function HostLobbyPage() {
     setError(err?.message || "WebSocket error");
   }, []);
 
+  // Stabilise the PIN given to the socket: `game?.game_pin` flips from ""
+  // to the real PIN once the REST load finishes.  Passing the flipping value
+  // straight into useGameSocket recreates connect()/disconnect() mid-flight,
+  // which closed the host socket exactly when QUESTION_STARTED arrived (the
+  // host never saw the question or its timer).  Latch the first non-empty
+  // PIN and never change it afterwards.
+  const [socketPin, setSocketPin] = useState("");
+
+  useEffect(() => {
+    const pin = game?.game_pin;
+    if (pin && !socketPin) {
+      setSocketPin(pin);
+    }
+  }, [game?.game_pin, socketPin]);
+
   const {
     connected,
+    role,
     game: wsGame,
     players,
     teams,
+    currentQuestion,
+    reveal,
+    leaderboard,
+    timeRemainingMs,
+    hasMoreQuestions,
     startGame,
+    nextQuestion,
+    endQuestion,
+    endGame,
     cancelGame,
   } = useGameSocket({
-    gamePin: game?.game_pin || "",
+    gamePin: socketPin,
     hostToken: hostToken || undefined,
     onError: handleSocketError,
   });
@@ -260,7 +285,10 @@ export function HostLobbyPage() {
   // WebSocket data is authoritative because it is live.  The REST lobby is
   // only a bootstrap fallback: once the socket has delivered a roster we must
   // trust it, otherwise a stale `lobby` snapshot silently masks live updates.
-  const hasLiveRoster = players.length > 0 || teams.length > 0;
+  // The socket roster is only "live" while the socket is actually connected;
+  // a stale post-disconnect snapshot of `[]` must never blank the list.
+  const hasLiveRoster =
+    connected && (players.length > 0 || teams.length > 0);
 
   const displayPlayers = hasLiveRoster
     ? players
@@ -278,6 +306,16 @@ export function HostLobbyPage() {
     (displayGame as any).state ||
     game.status ||
     "LOBBY";
+
+  // The lobby grid is only meaningful before the quiz opens.  Once the backend
+  // starts the quiz we swap in the live host stage, which is fed entirely by
+  // QUESTION_STARTED / QUESTION_ENDED / LEADERBOARD_UPDATED.
+  const isPlaying =
+    role !== "player" &&
+    (gameState === GameState.QUESTION_ACTIVE ||
+      gameState === GameState.QUESTION_REVEAL ||
+      gameState === GameState.LEADERBOARD ||
+      gameState === GameState.FINISHED);
 
   // ---------------------------------------------------------
   // PLAYER HELPERS
@@ -459,9 +497,39 @@ export function HostLobbyPage() {
       )}
 
       {/* =====================================================
+          LIVE HOST STAGE
+      ====================================================== */}
+
+      {isPlaying &&
+        (currentQuestion || reveal ? (
+          <HostGamePanel
+            gameState={gameState as GameState}
+            currentQuestion={currentQuestion}
+            reveal={reveal}
+            leaderboard={leaderboard}
+            timeRemainingMs={timeRemainingMs}
+            playerCount={displayPlayers.length}
+            hasMoreQuestions={hasMoreQuestions}
+            onNextQuestion={nextQuestion}
+            onEndQuestion={endQuestion}
+            onEndGame={endGame}
+          />
+        ) : (
+          <Card variant="outlined">
+            <CardContent className="py-16 text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-4 border-purple-600 border-t-transparent mx-auto" />
+              <p className="text-gray-400 mt-4">
+                Waiting for the first question…
+              </p>
+            </CardContent>
+          </Card>
+        ))}
+
+      {/* =====================================================
           MAIN GRID
       ====================================================== */}
 
+      {!isPlaying && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
         {/* ===================================================
@@ -841,6 +909,7 @@ export function HostLobbyPage() {
         </Card>
 
       </div>
+      )}
     </div>
   );
 }

@@ -52,6 +52,7 @@ from app.game.serializer import (
     question_payload,
     question_summary,
     reveal_payload,
+    sanitize_event_for_player,
     state_payload,
     team_payload,
 )
@@ -452,6 +453,7 @@ class GameEngine:
 
     # ----------------------------------------------------------- snapshot
     def snapshot(self, *, for_player_id: int | None = None) -> dict[str, Any]:
+        # state_payload now handles role-aware serialization internally.
         return state_payload(self, for_player_id=for_player_id)
 
     # ------------------------------------------------------- host: start
@@ -509,7 +511,17 @@ class GameEngine:
     def _cancel_timer(self) -> None:
         task = self._timer_task
         self._timer_task = None
-        if task is not None and not task.done():
+        if task is None or task.done():
+            return
+        # `_finalize_locked` is also reached FROM the timer task itself (the
+        # clock ran out).  Cancelling `asyncio.current_task()` would throw a
+        # CancelledError into the very coroutine that is closing the question,
+        # aborting it before QUESTION_ENDED is ever broadcast - which strands
+        # every client in a half-revealed state.  Detach the reference (done
+        # above) and let the running task wind down on its own; when the caller
+        # is a different task (host advance, early close, teardown) the sleeping
+        # timer still has to be cancelled.
+        if task is not asyncio.current_task():
             task.cancel()
 
     async def _question_timer(self, index: int, ends_at: datetime) -> None:
