@@ -48,6 +48,9 @@ export interface HostGamePanelProps {
   onNextQuestion: () => void;
   onEndQuestion: () => void;
   onEndGame: () => void;
+  // Total questions in the quiz. Required when game finishes because
+  // currentQuestion/reveal become null but we still need to display the count.
+  totalQuestions?: number;
 }
 
 export function HostGamePanel({
@@ -61,6 +64,7 @@ export function HostGamePanel({
   onNextQuestion,
   onEndQuestion,
   onEndGame,
+  totalQuestions,
 }: HostGamePanelProps) {
   const isActive = gameState === GameState.QUESTION_ACTIVE;
   const isReveal =
@@ -71,6 +75,16 @@ export function HostGamePanel({
   // Live question while answering; after it closes we show the same question
   // merged with the reveal payload (correct answer + distribution).
   const question = isActive ? currentQuestion : currentQuestion ?? reveal;
+
+  // Final results are shown when the game is FINISHED and we have leaderboard data.
+  // This must be checked BEFORE the early return below, because currentQuestion/reveal
+  // become null when the backend transitions to FINISHED.
+  const isFinalResults = isFinished && leaderboard && leaderboard.entries.length > 0;
+
+  // Fallback totalQuestions from prop when question is null (e.g., at FINISHED state)
+  const total = question?.totalQuestions ?? totalQuestions ?? 0;
+  const number = question?.questionNumber ?? 0;
+  const timeLimit = question?.timeLimit ?? 20;
 
   // Local timer fallback: if the prop updates are delayed, compute from question data
   const [localTimeRemaining, setLocalTimeRemaining] = useState<number | null>(null);
@@ -115,14 +129,6 @@ export function HostGamePanel({
   // Use prop timeRemainingMs as primary, local as fallback
   const effectiveTimeRemainingMs = timeRemainingMs ?? localTimeRemaining;
 
-  if (!question) {
-    return null;
-  }
-
-  const total = question.totalQuestions;
-  const number = question.questionNumber;
-  const timeLimit = question.timeLimit || 20;
-
   const seconds =
     effectiveTimeRemainingMs !== null
       ? Math.max(0, Math.ceil(effectiveTimeRemainingMs / 1000))
@@ -134,14 +140,11 @@ export function HostGamePanel({
       : 0;
 
   const correctIndex = isReveal
-    ? (reveal?.correctIndex ?? question.correctIndex)
+    ? (reveal?.correctIndex ?? question?.correctIndex)
     : undefined;
   const distribution = isReveal ? reveal?.distribution : undefined;
-  const answeredCount = question.answeredCount;
+  const answeredCount = question?.answeredCount;
   const expired = isActive && seconds === 0;
-
-  // ===== FINAL RESULTS STATE =====
-  const isFinalResults = isFinished && leaderboard && leaderboard.entries.length > 0;
 
   // Get sorted entries for final leaderboard
   const finalEntries = leaderboard?.entries ?? [];
@@ -212,7 +215,7 @@ export function HostGamePanel({
                 {isActive
                   ? expired
                     ? "Time expired — closing question"
-                    : `Up to ${question.points} points`
+                    : `Up to ${question?.points ?? 0} points`
                   : "Answer revealed"}
               </p>
             </div>

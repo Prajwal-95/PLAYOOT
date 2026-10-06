@@ -297,6 +297,7 @@ export function PlayPage() {
             onNextQuestion={nextQuestion}
             onEndQuestion={endQuestion}
             onEndGame={endGame}
+            totalQuestions={game?.totalQuestions}
           />
         </main>
       </div>
