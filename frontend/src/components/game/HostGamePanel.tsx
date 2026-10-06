@@ -1,41 +1,16 @@
-import { useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
+import { Check, Timer, Trophy } from "lucide-react";
 import {
   GameState,
   Leaderboard,
+  LeaderboardEntry,
   Question,
 } from "../../types/game";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardHeader } from "../ui/Card";
 import { cn } from "../../utils/cn";
-
-// Kahoot's four signature option colours, in wire order.
-const OPTION_STYLES = [
-  {
-    tile: "bg-rose-600 hover:bg-rose-500",
-    badge: "bg-rose-700/60 text-white",
-    shape: "■",
-    bar: "bg-rose-500",
-  },
-  {
-    tile: "bg-sky-600 hover:bg-sky-500",
-    badge: "bg-sky-700/60 text-white",
-    shape: "●",
-    bar: "bg-sky-500",
-  },
-  {
-    tile: "bg-amber-500 hover:bg-amber-400",
-    badge: "bg-amber-600/70 text-white",
-    shape: "▲",
-    bar: "bg-amber-400",
-  },
-  {
-    tile: "bg-emerald-600 hover:bg-emerald-500",
-    badge: "bg-emerald-700/60 text-white",
-    shape: "◆",
-    bar: "bg-emerald-500",
-  },
-];
+import { OPTION_STYLES } from "./optionStyles";
 
 export interface HostGamePanelProps {
   gameState: GameState;
@@ -51,8 +26,76 @@ export interface HostGamePanelProps {
   // Total questions in the quiz. Required when game finishes because
   // currentQuestion/reveal become null but we still need to display the count.
   totalQuestions?: number;
-  // Number of winners to show (from quiz configuration)
+  // Number of winners to show - authoritative `Quiz.winners_count` (1/3/5/10).
   winnersCount?: number;
+  /**
+   * Sticky-docking offset for the control bar, so it always lands directly
+   * under whatever header the host is looking at: the app shell nav is h-16,
+   * the full-screen host stage header on /play is h-14.
+   */
+  stickyOffset?: string;
+}
+
+/** One line of the post-question scoreboard.  Every figure comes verbatim
+ *  from the backend reveal/leaderboard payloads - nothing is scored here. */
+interface ScoreRow {
+  key: string;
+  playerId: number;
+  name: string;
+  rank: number | null;
+  answered: boolean;
+  isCorrect: boolean;
+  responseTimeMs: number;
+  pointsAwarded: number;
+  totalScore: number;
+}
+
+/** Cumulative score that counts up from last question's total to this one's. */
+function CountUp({
+  from,
+  to,
+  duration = 700,
+}: {
+  from: number;
+  to: number;
+  duration?: number;
+}) {
+  const [value, setValue] = useState(from);
+  const frameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const delta = to - from;
+    if (delta === 0) {
+      setValue(to);
+      return;
+    }
+    const startedAt = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setValue(Math.round(from + delta * eased));
+      if (t < 1) {
+        frameRef.current = requestAnimationFrame(tick);
+      } else {
+        setValue(to);
+        frameRef.current = null;
+      }
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+  }, [from, to, duration]);
+
+  return <>{value}</>;
+}
+
+function formatResponseTime(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function HostGamePanel({
@@ -68,6 +111,7 @@ export function HostGamePanel({
   onEndGame,
   totalQuestions,
   winnersCount = 3,
+  stickyOffset = "top-16",
 }: HostGamePanelProps) {
   const isActive = gameState === GameState.QUESTION_ACTIVE;
   const isReveal =
@@ -82,7 +126,7 @@ export function HostGamePanel({
   // Final results are shown when the game is FINISHED and we have leaderboard data.
   // This must be checked BEFORE the early return below, because currentQuestion/reveal
   // become null when the backend transitions to FINISHED.
-  const isFinalResults = isFinished && leaderboard && leaderboard.entries.length > 0;
+  const isFinalResults = isFinished && !!leaderboard && leaderboard.entries.length > 0;
 
   // Fallback totalQuestions from prop when question is null (e.g., at FINISHED state)
   const total = question?.totalQuestions ?? totalQuestions ?? 0;
@@ -149,35 +193,190 @@ export function HostGamePanel({
   const answeredCount = question?.answeredCount;
   const expired = isActive && seconds === 0;
 
-  // Get sorted entries for final leaderboard
+  // ---------------------------------------------------------------
+  // PER-QUESTION SCOREBOARD (host, after every question)
+  //
+  // Built purely from the authoritative `reveal.results` +
+  // `leaderboard.entries` payloads.  The React layer never scores anything:
+  // it only arranges and animates what the backend already computed.
+  // ---------------------------------------------------------------
+  const scoreRows = useMemo<ScoreRow[]>(() => {
+    const results = reveal?.results ?? [];
+    const entries = leaderboard?.entries ?? [];
+    const isTeam = leaderboard?.mode === "team";
+
+    const entryFor = (playerId: number): LeaderboardEntry | undefined => {
+      if (!isTeam) {
+        return entries.find((e) => (e.playerId ?? e.id) === playerId);
+      }
+      return entries.find((e) =>
+        (e.members ?? []).some((m) => m.playerId === playerId)
+      );
+    };
+
+    const rows: ScoreRow[] = results.map((r) => ({
+      key: `p${r.playerId}`,
+      playerId: r.playerId,
+      name: r.nickname,
+      rank: entryFor(r.playerId)?.rank ?? null,
+      answered: true,
+      isCorrect: r.isCorrect,
+      responseTimeMs: r.responseTimeMs,
+      pointsAwarded: r.pointsAwarded,
+      totalScore: r.totalScore,
+    }));
+
+    const answered = new Set(results.map((r) => r.playerId));
+    // Everyone on the roster who did not answer still gets a row, so the
+    // board always accounts for every participant.
+    const nonResponders: Array<{
+      playerId: number;
+      name: string;
+      rank: number | null;
+      score: number;
+    }> = [];
+
+    if (isTeam) {
+      for (const entry of entries) {
+        for (const member of entry.members ?? []) {
+          if (answered.has(member.playerId)) continue;
+          nonResponders.push({
+            playerId: member.playerId,
+            name: member.nickname,
+            rank: entry.rank,
+            score: member.score,
+          });
+        }
+      }
+    } else {
+      for (const entry of entries) {
+        const playerId = entry.playerId ?? entry.id;
+        if (answered.has(playerId)) continue;
+        nonResponders.push({
+          playerId,
+          name: entry.name,
+          rank: entry.rank,
+          score: entry.score,
+        });
+      }
+    }
+
+    for (const nr of nonResponders) {
+      rows.push({
+        key: `p${nr.playerId}`,
+        playerId: nr.playerId,
+        name: nr.name,
+        rank: nr.rank,
+        answered: false,
+        isCorrect: false,
+        responseTimeMs: 0,
+        pointsAwarded: 0,
+        totalScore: nr.score,
+      });
+    }
+
+    rows.sort((a, b) => {
+      if (a.rank !== null && b.rank !== null && a.rank !== b.rank) {
+        return a.rank - b.rank;
+      }
+      if (a.rank === null && b.rank !== null) return 1;
+      if (a.rank !== null && b.rank === null) return -1;
+      if (b.pointsAwarded !== a.pointsAwarded) {
+        return b.pointsAwarded - a.pointsAwarded;
+      }
+      return a.responseTimeMs - b.responseTimeMs;
+    });
+
+    return rows;
+  }, [reveal, leaderboard]);
+
+  // -----------------------------------------------------------------
+  // FINAL RESULTS FLOW (manual, host-driven)
+  //
+  //   board     -> the COMPLETE leaderboard of every participant
+  //   [SELECT WINNERS] sticky at the TOP (never auto-selected)
+  //   reveal    -> bottom-to-top rank reveal, slide-up/fade/scale stagger
+  //   suspense  -> drumroll
+  //   winners   -> podium built from the authoritative winnersCount
+  // -----------------------------------------------------------------
+  type FinalPhase = "board" | "reveal" | "suspense" | "winners";
+  const [finalPhase, setFinalPhase] = useState<FinalPhase>("board");
+  const finalTimersRef = useRef<number[]>([]);
+
+  const clearFinalTimers = useCallback(() => {
+    for (const timer of finalTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    finalTimersRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    clearFinalTimers();
+    setFinalPhase("board");
+    return clearFinalTimers;
+  }, [isFinalResults, clearFinalTimers]);
+
   const finalEntries = leaderboard?.entries ?? [];
 
-  // Winners are the top N entries (already sorted by score desc)
-  const winners = finalEntries.slice(0, winnersCount || 3);
+  // Winners come from the backend's `winnersCount` and are clamped to the
+  // number of real participants, so a podium never shows a fabricated slot.
+  const winnerCount = Math.min(
+    Math.max(winnersCount || 3, 1),
+    finalEntries.length
+  );
+  const winners = finalEntries.slice(0, winnerCount);
+  // A 3+ place podium reads 2nd / 1st / 3rd left-to-right.
+  const podiumOrder =
+    winners.length >= 3
+      ? [1, 0, 2, ...winners.slice(3).map((_, index) => index + 3)]
+      : winners.map((_, index) => index);
 
-  // Animation phase states
-  const [phase, setPhase] = useState<"quizComplete" | "suspense" | "reveal" | "winners" | "celebration">("quizComplete");
+  const startWinnerReveal = useCallback(() => {
+    clearFinalTimers();
+    const rows = Math.max(finalEntries.length, 1);
+    const revealMs = rows * 220 + 500;
+    setFinalPhase("reveal");
+    finalTimersRef.current.push(
+      window.setTimeout(() => setFinalPhase("suspense"), revealMs),
+      window.setTimeout(() => setFinalPhase("winners"), revealMs + 1500)
+    );
+  }, [finalEntries.length, clearFinalTimers]);
 
-  // Trigger animation sequence when final results appear
-  useEffect(() => {
-    if (isFinalResults) {
-      const timer1 = setTimeout(() => setPhase("suspense"), 800);
-      const timer2 = setTimeout(() => setPhase("reveal"), 1800);
-      const timer3 = setTimeout(() => setPhase("winners"), 1800 + finalEntries.length * 200 + 800);
-      const timer4 = setTimeout(() => setPhase("celebration"), 1800 + finalEntries.length * 200 + 1600);
-      return () => {
-        clearTimeout(timer1);
-        clearTimeout(timer2);
-        clearTimeout(timer3);
-        clearTimeout(timer4);
-      };
-    } else {
-      setPhase("quizComplete");
-    }
-  }, [isFinalResults, finalEntries.length]);
+  // The progression control docks to the top of the scroll container, so it
+  // is always on screen no matter how long the scoreboard gets.
+  const showNextQuestionBar =
+    isReveal && !isFinalResults && hasMoreQuestions && Boolean(question);
 
   return (
     <div className="space-y-6">
+      {/* =====================================================
+          STICKY CONTROL BAR - always at the TOP, never scrolled to
+      ====================================================== */}
+      {showNextQuestionBar && (
+        <div className={cn("sticky z-30 py-2", stickyOffset)}>
+          <div className="rounded-2xl border border-purple-500/40 bg-gray-950/95 backdrop-blur px-3 py-3 shadow-lg shadow-black/50">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <Button
+                size="lg"
+                onClick={onNextQuestion}
+                className="flex-1 sm:flex-none sm:min-w-[280px]"
+              >
+                Next Question →
+              </Button>
+
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={onEndGame}
+                className="flex-1 sm:flex-none"
+              >
+                End Quiz
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* =====================================================
           PROGRESS + TIMER (only during active gameplay)
       ====================================================== */}
@@ -273,289 +472,271 @@ export function HostGamePanel({
           animate={{ opacity: 1 }}
           className="space-y-6"
         >
-          {/* PHASE 1: QUIZ COMPLETE */}
-          <AnimatePresence mode="wait">
-            {phase === "quizComplete" && (
-              <motion.div
-                key="quizComplete"
-                initial={{ scale: 0.8, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 1.2, opacity: 0 }}
-                className="text-center py-12"
+          {/* SELECT WINNERS - sticky at the TOP, manual only */}
+          {finalPhase === "board" && (
+            <div className={cn("sticky z-30 py-2", stickyOffset)}>
+              <Button
+                size="lg"
+                onClick={startWinnerReveal}
+                className="w-full sm:w-auto sm:min-w-[360px] mx-auto flex items-center justify-center gap-3"
               >
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className="text-6xl block mb-4"
-                >
-                  🏁
-                </motion.span>
-                <motion.h1
-                  initial={{ y: 20, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  className="text-4xl sm:text-5xl font-black text-white mb-2"
-                >
-                  QUIZ COMPLETE
-                </motion.h1>
-                <motion.p
-                  initial={{ y: 10, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  className="text-lg text-gray-400"
-                >
-                  {total} question{total === 1 ? "" : "s"} played • {playerCount} player{playerCount === 1 ? "" : "s"}
-                </motion.p>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                <Trophy className="w-5 h-5" />
+                Select Winners
+              </Button>
+            </div>
+          )}
 
-          {/* PHASE 2: SUSPENSE - FINAL RESULTS TITLE */}
-          <AnimatePresence mode="wait">
-            {(phase === "suspense" || phase === "reveal" || phase === "winners" || phase === "celebration") && (
-              <motion.div
-                key="finalResultsTitle"
-                initial={{ y: -20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: -20, opacity: 0 }}
-                className="text-center mb-6"
-              >
-                <motion.span
-                  initial={{ scale: 0.5 }}
-                  animate={{ scale: 1 }}
-                  className="text-5xl block mb-2"
-                >
-                  📊
-                </motion.span>
-                <motion.h2
-                  initial={{ y: 10, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  className="text-3xl sm:text-4xl font-black text-yellow-400 tracking-wider"
-                >
-                  FINAL RESULTS
-                </motion.h2>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {/* QUIZ COMPLETE */}
+          <div className="text-center py-6">
+            <motion.h1
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              className="text-4xl sm:text-5xl font-black text-white mb-2"
+            >
+              QUIZ COMPLETE
+            </motion.h1>
+            <motion.p
+              initial={{ y: 10, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.1 }}
+              className="text-lg text-gray-400"
+            >
+              {total} question{total === 1 ? "" : "s"} played • {playerCount}{" "}
+              player{playerCount === 1 ? "" : "s"}
+            </motion.p>
+          </div>
 
-          {/* PHASE 3: PLAYER REVEAL - Leaderboard entries from bottom to top */}
-          <AnimatePresence mode="wait">
-            {(phase === "reveal" || phase === "winners" || phase === "celebration") && (
-              <motion.div
-                key="leaderboard"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="space-y-3"
-              >
-                <Card variant="outlined" className="overflow-hidden">
-                  <CardContent className="py-4 px-6">
-                    <div className="space-y-2">
-                      {/* Render entries in reverse order (bottom to top) with stagger */}
-                      {finalEntries
-                        .slice()
-                        .reverse()
-                        .map((entry, reverseIndex) => {
-                          const delay = reverseIndex * 200;
-                          const isWinner = winners.some(w => w.id === entry.id);
-                          // All entries shown during reveal phase
-                          
-                          return (
-                            <AnimatePresence key={entry.id} mode="wait">
-                              <motion.div
-                                key={entry.id}
-                                initial={{ x: -50, opacity: 0 }}
-                                animate={{ x: 0, opacity: 1 }}
-                                exit={{ x: 50, opacity: 0 }}
-                                transition={{ delay, duration: 0.4, ease: "easeOut" }}
-                                className={cn(
-                                  "flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-800/60 transition-all",
-                                  isWinner && "bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border border-yellow-500/30"
-                                )}
-                              >
-                                <div className="flex items-center gap-3 min-w-0">
-                                  <motion.span
-                                    initial={{ scale: 0 }}
-                                    animate={{ scale: 1 }}
-                                    transition={{ delay: delay + 100, type: "spring", stiffness: 200, damping: 15 }}
-                                    className={cn(
-                                      "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
-                                      entry.rank === 1
-                                        ? "bg-yellow-500 text-black"
-                                        : entry.rank === 2
-                                        ? "bg-gray-400 text-black"
-                                        : entry.rank === 3
-                                        ? "bg-amber-700 text-white"
-                                        : "bg-gray-700 text-gray-300"
-                                    )}
-                                  >
-                                    {entry.rank}
-                                  </motion.span>
-                                  <motion.span
-                                    initial={{ x: -20, opacity: 0 }}
-                                    animate={{ x: 0, opacity: 1 }}
-                                    transition={{ delay: delay + 150 }}
-                                    className="font-medium truncate"
-                                  >
-                                    {entry.name}
-                                  </motion.span>
-                                </div>
-                                <motion.span
-                                  initial={{ x: 20, opacity: 0 }}
-                                  animate={{ x: 0, opacity: 1 }}
-                                  transition={{ delay: delay + 150 }}
-                                  className="font-bold text-purple-300 whitespace-nowrap"
-                                >
-                                  {entry.score}
-                                </motion.span>
-                              </motion.div>
-                            </AnimatePresence>
-                          );
-                        })}
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {/* COMPLETE LEADERBOARD - every participant, always first */}
+          {(finalPhase === "board" ||
+            finalPhase === "reveal" ||
+            finalPhase === "suspense") && (
+            <div key={finalPhase} className="space-y-3">
+              <h2 className="text-center text-sm uppercase tracking-[0.3em] text-yellow-400 font-bold">
+                {finalPhase === "board"
+                  ? "Final leaderboard"
+                  : "Final results"}
+              </h2>
 
-          {/* PHASE 4: WINNERS REVEAL */}
-          <AnimatePresence mode="wait">
-            {(phase === "winners" || phase === "celebration") && winners.length > 0 && (
-              <motion.div
-                key="winnersReveal"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="relative"
-              >
-                {/* Suspense message */}
-                <motion.div
-                  initial={{ y: 20, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  exit={{ y: -20, opacity: 0 }}
-                  transition={{ delay: 0.3 }}
-                  className="text-center py-6"
-                >
-                  <motion.span className="text-4xl block mb-2">🥁</motion.span>
-                  <motion.h3
-                    initial={{ scale: 0.8 }}
-                    animate={{ scale: 1 }}
-                    className="text-2xl sm:text-3xl font-bold text-yellow-300 uppercase tracking-wider animate-pulse"
-                  >
-                    {winners.length === 1 ? "AND THE WINNER IS..." : `TOP ${winners.length} WINNERS...`}
-                  </motion.h3>
-                </motion.div>
+              <Card variant="outlined" className="overflow-hidden">
+                <CardContent className="py-4 px-4 sm:px-6">
+                  <div className="space-y-2">
+                    {(finalPhase === "reveal" || finalPhase === "suspense"
+                      ? finalEntries.slice().reverse()
+                      : finalEntries
+                    ).map((entry, position) => {
+                      // Bottom-to-top reveal: the LAST place row lands first,
+                      // the champion lands last for maximum suspense.
+                      const delay =
+                        finalPhase === "reveal" ? position * 0.22 : position * 0.05;
+                      const isWinner = winners.some((w) => w.id === entry.id);
 
-                {/* Winners cards - only mounts when the reveal phase lands */}
-                {phase === "celebration" && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: 0.5 }}
-                    className="space-y-4"
-                  >
-                    {winners.map((winner, index) => (
-                      <motion.div
-                        key={winner.id}
-                        initial={{ scale: 0.5, y: 50, opacity: 0 }}
-                        animate={{ scale: 1, y: 0, opacity: 1 }}
-                        transition={{ type: "spring", stiffness: 150, damping: 12, delay: index * 0.2 }}
-                        className="relative"
-                      >
-                        <Card
-                          variant="outlined"
+                      return (
+                        <motion.div
+                          key={entry.id}
+                          initial={{ y: 60, opacity: 0, scale: 0.85 }}
+                          animate={{ y: 0, opacity: 1, scale: 1 }}
+                          transition={{
+                            delay,
+                            duration: finalPhase === "reveal" ? 0.45 : 0.3,
+                            ease: "easeOut",
+                          }}
                           className={cn(
-                            "relative overflow-hidden",
-                            index === 0
-                              ? "bg-gradient-to-br from-yellow-500/10 via-amber-500/5 to-orange-500/10 border-2 border-yellow-500/50"
-                              : index === 1
-                              ? "bg-gradient-to-br from-gray-400/10 via-gray-500/5 to-gray-600/10 border-2 border-gray-400/50"
-                              : index === 2
-                              ? "bg-gradient-to-br from-amber-700/10 via-amber-800/5 to-orange-700/10 border-2 border-amber-700/50"
-                              : "bg-gradient-to-br from-purple-500/10 via-indigo-500/5 to-purple-600/10 border-2 border-purple-500/50"
+                            "flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-800/60",
+                            isWinner &&
+                              "bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border border-yellow-500/30"
                           )}
                         >
-                          <CardContent className="py-8 px-6 relative">
-                            {/* Confetti/decoration for 1st place */}
-                            {index === 0 && (
-                              <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                                <motion.div
-                                  animate={{ rotate: 360 }}
-                                  transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                                  className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-gradient-to-r from-yellow-400/20 via-transparent to-amber-400/20 rounded-full blur-3xl"
-                                />
-                              </div>
-                            )}
-
-                            <div className="relative z-10 text-center space-y-3">
-                              <motion.span
-                                animate={index === 0 ? { scale: [1, 1.1, 1] } : {}}
-                                transition={{ duration: 1.5, repeat: Infinity }}
-                                className="text-6xl block"
-                              >
-                                {index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : "🏅"}
-                              </motion.span>
-
-                              <motion.h2
-                                initial={{ y: 20, opacity: 0 }}
-                                animate={{ y: 0, opacity: 1 }}
-                                transition={{ delay: 0.3 }}
-                                className="text-sm uppercase tracking-widest text-yellow-400 font-bold"
-                              >
-                                {index === 0 ? "WINNER" : index === 1 ? "RUNNER-UP" : index === 2 ? "THIRD PLACE" : `PLACE ${index + 1}`}
-                              </motion.h2>
-
-                              <motion.h1
-                                initial={{ y: 20, opacity: 0, scale: 0.9 }}
-                                animate={{ y: 0, opacity: 1, scale: 1 }}
-                                transition={{ delay: 0.5, type: "spring", stiffness: 100, damping: 10 }}
-                                className={cn(
-                                  "font-black text-white",
-                                  index === 0 ? "text-5xl sm:text-7xl" : "text-3xl sm:text-4xl"
-                                )}
-                              >
-                                {winner.name}
-                              </motion.h1>
-
-                              <motion.div
-                                initial={{ y: 20, opacity: 0, scale: 0.9 }}
-                                animate={{ y: 0, opacity: 1, scale: 1 }}
-                                transition={{ delay: 0.7, type: "spring", stiffness: 100, damping: 10 }}
-                                className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-yellow-500/20 border border-yellow-500/50"
-                              >
-                                <span className="text-xl">{index === 0 ? "🏆" : index === 1 ? "🥈" : index === 2 ? "🥉" : "🏅"}</span>
-                                <span className={cn("font-black text-yellow-400 tabular-nums", index === 0 ? "text-2xl sm:text-3xl" : "text-xl sm:text-2xl")}>
-                                  {winner.score} POINTS
-                                </span>
-                              </motion.div>
-
-                              {winner.teamName && (
-                                <motion.p
-                                  initial={{ y: 10, opacity: 0 }}
-                                  animate={{ y: 0, opacity: 1 }}
-                                  transition={{ delay: 0.9 }}
-                                  className="text-sm text-gray-400"
-                                >
-                                  Team: {winner.teamName}
-                                </motion.p>
+                          <div className="flex items-center gap-3 min-w-0">
+                            <motion.span
+                              initial={{ scale: 0 }}
+                              animate={{ scale: 1 }}
+                              transition={{
+                                delay: delay + 0.1,
+                                type: "spring",
+                                stiffness: 220,
+                                damping: 15,
+                              }}
+                              className={cn(
+                                "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
+                                entry.rank === 1
+                                  ? "bg-yellow-500 text-black"
+                                  : entry.rank === 2
+                                  ? "bg-gray-400 text-black"
+                                  : entry.rank === 3
+                                  ? "bg-amber-700 text-white"
+                                  : "bg-gray-700 text-gray-300"
                               )}
-                            </div>
-                          </CardContent>
-                        </Card>
-                      </motion.div>
-                    ))}
-                  </motion.div>
-                )}
+                            >
+                              {entry.rank}
+                            </motion.span>
+                            <motion.span
+                              initial={{ x: -20, opacity: 0 }}
+                              animate={{ x: 0, opacity: 1 }}
+                              transition={{ delay: delay + 0.15 }}
+                              className="font-medium truncate"
+                            >
+                              {entry.name}
+                            </motion.span>
+                          </div>
+                          <motion.span
+                            initial={{ x: 20, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            transition={{ delay: delay + 0.15 }}
+                            className="font-bold text-purple-300 whitespace-nowrap tabular-nums"
+                          >
+                            {entry.score}
+                          </motion.span>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
 
-                {/* Celebration particles for 1st place */}
-                {phase === "celebration" && winners.length > 0 && (
-                  <CelebrationParticles />
-                )}
+          {/* SUSPENSE */}
+          {finalPhase === "suspense" && (
+            <motion.div
+              key="suspense"
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              className="text-center py-6"
+            >
+              <motion.h3
+                animate={{ scale: [1, 1.04, 1] }}
+                transition={{ duration: 0.9, repeat: Infinity }}
+                className="text-2xl sm:text-3xl font-bold text-yellow-300 uppercase tracking-wider"
+              >
+                {winnerCount === 1
+                  ? "And the winner is…"
+                  : `Top ${winnerCount} winners…`}
+              </motion.h3>
+            </motion.div>
+          )}
+
+          {/* WINNERS PODIUM - top N from the authoritative winnersCount */}
+          {finalPhase === "winners" && winners.length > 0 && (
+            <motion.div
+              key="winners"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="space-y-4"
+            >
+              <motion.div
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                className="text-center"
+              >
+                <h2 className="text-3xl sm:text-4xl font-black text-yellow-400 tracking-wider uppercase">
+                  {winners.length === 1 ? "Winner" : "Winners"}
+                </h2>
               </motion.div>
-            )}
-          </AnimatePresence>
 
-          {/* No "Next Question" after the final question - the backend has
-              already transitioned to FINISHED and the sequence above is the
-              entire finale.  Existing page chrome (Dashboard / Return to Join)
-              remains the way out, so no extra controls are added here. */}
+              <div
+                className={cn(
+                  "grid gap-4 items-end",
+                  winners.length === 1
+                    ? "grid-cols-1 max-w-md mx-auto"
+                    : "grid-cols-1 sm:grid-cols-3"
+                )}
+              >
+                {podiumOrder
+                  .filter((index) => index < winners.length)
+                  .map((index) => {
+                    const winner = winners[index];
+                    const place = index + 1;
+                    return (
+                      <motion.div
+                        key={winner.id}
+                        initial={{ scale: 0.5, y: 60, opacity: 0 }}
+                        animate={{ scale: 1, y: 0, opacity: 1 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 150,
+                          damping: 13,
+                          delay: index * 0.2,
+                        }}
+                        className={cn(
+                          "relative overflow-hidden rounded-2xl border-2",
+                          place === 1
+                            ? "sm:min-h-[300px] bg-gradient-to-br from-yellow-500/10 via-amber-500/5 to-orange-500/10 border-yellow-500/50"
+                            : place === 2
+                            ? "sm:min-h-[250px] bg-gradient-to-br from-gray-400/10 via-gray-500/5 to-gray-600/10 border-gray-400/50"
+                            : place === 3
+                            ? "sm:min-h-[215px] bg-gradient-to-br from-amber-700/10 via-amber-800/5 to-orange-700/10 border-amber-700/50"
+                            : "bg-gradient-to-br from-purple-500/10 via-indigo-500/5 to-purple-600/10 border-purple-500/40"
+                        )}
+                      >
+                        {place === 1 && (
+                          <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                            <motion.div
+                              animate={{ rotate: 360 }}
+                              transition={{
+                                duration: 20,
+                                repeat: Infinity,
+                                ease: "linear",
+                              }}
+                              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-gradient-to-r from-yellow-400/20 via-transparent to-amber-400/20 rounded-full blur-3xl"
+                            />
+                          </div>
+                        )}
+
+                        <div className="relative z-10 text-center space-y-3 px-4 py-6 sm:py-8">
+                          <motion.span
+                            animate={
+                              place === 1 ? { scale: [1, 1.1, 1] } : {}
+                            }
+                            transition={{ duration: 1.5, repeat: Infinity }}
+                            className="text-5xl block"
+                          >
+                            {place === 1 ? "🏆" : place === 2 ? "🥈" : place === 3 ? "🥉" : "🏅"}
+                          </motion.span>
+
+                          <p className="text-xs uppercase tracking-widest text-yellow-400 font-bold">
+                            {place === 1
+                              ? "Winner"
+                              : place === 2
+                              ? "Runner-up"
+                              : place === 3
+                              ? "Third place"
+                              : `Place ${place}`}
+                          </p>
+
+                          <h3
+                            className={cn(
+                              "font-black text-white break-words",
+                              place === 1
+                                ? "text-3xl sm:text-5xl"
+                                : "text-2xl sm:text-3xl"
+                            )}
+                          >
+                            {winner.name}
+                          </h3>
+
+                          <p
+                            className={cn(
+                              "inline-flex items-center gap-2 px-4 py-2 rounded-full bg-yellow-500/20 border border-yellow-500/50 font-black text-yellow-400 tabular-nums",
+                              place === 1 ? "text-2xl" : "text-lg"
+                            )}
+                          >
+                            {winner.score} POINTS
+                          </p>
+
+                          {winner.teamName && (
+                            <p className="text-sm text-gray-400">
+                              Team: {winner.teamName}
+                            </p>
+                          )}
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+              </div>
+
+              <CelebrationParticles />
+            </motion.div>
+          )}
         </motion.div>
       )}
 
@@ -580,6 +761,7 @@ export function HostGamePanel({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
             {question.options.map((option, index) => {
               const style = OPTION_STYLES[index % OPTION_STYLES.length];
+              const Shape = style.Shape;
               const isCorrect =
                 correctIndex !== undefined && index === correctIndex;
               const count = distribution?.[index];
@@ -600,12 +782,12 @@ export function HostGamePanel({
                   <div className="flex items-center gap-4 px-5 py-5 sm:py-6 min-h-[92px]">
                     <span
                       className={cn(
-                        "w-11 h-11 sm:w-12 sm:h-12 rounded-lg grid place-items-center text-xl font-black flex-shrink-0",
+                        "w-11 h-11 sm:w-12 sm:h-12 rounded-lg grid place-items-center flex-shrink-0",
                         style.badge
                       )}
                       aria-hidden="true"
                     >
-                      {style.shape}
+                      <Shape className="w-5 h-5 sm:w-6 sm:h-6" strokeWidth={3} />
                     </span>
 
                     <span className="flex-1 text-white font-semibold text-lg sm:text-xl leading-snug break-words">
@@ -613,9 +795,11 @@ export function HostGamePanel({
                     </span>
 
                     {isReveal && isCorrect && (
-                      <span className="flex-shrink-0 text-3xl" aria-hidden="true">
-                        ✅
-                      </span>
+                      <Check
+                        className="flex-shrink-0 w-8 h-8 text-white"
+                        strokeWidth={3}
+                        aria-hidden="true"
+                      />
                     )}
                   </div>
 
@@ -631,7 +815,11 @@ export function HostGamePanel({
                         <div
                           className={cn("h-full rounded-full", style.bar)}
                           style={{
-                            width: `${playerCount > 0 ? Math.min(100, (count / playerCount) * 100) : 0}%`,
+                            width: `${
+                              playerCount > 0
+                                ? Math.min(100, (count / playerCount) * 100)
+                                : 0
+                            }%`,
                           }}
                         />
                       </div>
@@ -645,13 +833,15 @@ export function HostGamePanel({
           {/* Reveal detail */}
           {isReveal && (
             <div className="space-y-4">
-              {(reveal?.correctAnswer || reveal?.correctIndex !== undefined) && (
+              {(reveal?.correctAnswer ||
+                reveal?.correctIndex !== undefined) && (
                 <div className="p-4 rounded-xl bg-green-900/20 border border-green-700/50 text-center">
                   <p className="text-sm uppercase tracking-wider text-green-400 font-semibold">
                     Correct answer
                   </p>
                   <p className="text-lg font-bold text-green-200 mt-1">
-                    {reveal?.correctAnswer ?? question.options[reveal?.correctIndex ?? -1]}
+                    {reveal?.correctAnswer ??
+                      question.options[reveal?.correctIndex ?? -1]}
                   </p>
                   {reveal?.explanation && (
                     <p className="text-sm text-gray-300 mt-2 italic">
@@ -661,45 +851,108 @@ export function HostGamePanel({
                 </div>
               )}
 
-              {leaderboard && leaderboard.entries.length > 0 && (
+              {/* ----------------------------------------------------
+                  PER-QUESTION SCOREBOARD
+                  rank · name · +points this question · cumulative
+                  count-up · correct/incorrect · response time
+              ----------------------------------------------------- */}
+              {scoreRows.length > 0 && (
                 <Card variant="outlined">
                   <CardHeader>
-                    <h3 className="text-lg font-semibold">
-                      {leaderboard.mode === "team"
-                        ? "👥 Team standings"
-                        : "🏆 Standings"}
+                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                      <Timer className="w-4 h-4 text-purple-400" />
+                      Question scoreboard
                     </h3>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-2">
-                      {leaderboard.entries.slice(0, 5).map((entry) => (
-                        <div
-                          key={entry.id}
-                          className="flex items-center justify-between gap-3 p-3 rounded-lg bg-gray-800/60"
+                      {scoreRows.map((row, index) => (
+                        <motion.div
+                          key={row.key}
+                          initial={{ y: 24, opacity: 0, scale: 0.96 }}
+                          animate={{ y: 0, opacity: 1, scale: 1 }}
+                          transition={{
+                            delay: index * 0.07,
+                            duration: 0.4,
+                            ease: "easeOut",
+                          }}
+                          className="flex items-center gap-3 p-3 rounded-lg bg-gray-800/60"
                         >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <span
-                              className={cn(
-                                "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
-                                entry.rank === 1
-                                  ? "bg-yellow-500 text-black"
-                                  : entry.rank === 2
-                                  ? "bg-gray-400 text-black"
-                                  : entry.rank === 3
-                                  ? "bg-amber-700 text-white"
-                                  : "bg-gray-700 text-gray-300"
-                              )}
-                            >
-                              {entry.rank}
-                            </span>
-                            <span className="font-medium truncate">
-                              {entry.name}
-                            </span>
-                          </div>
-                          <span className="font-bold text-purple-300 whitespace-nowrap">
-                            {entry.score}
+                          <span
+                            className={cn(
+                              "w-8 h-8 rounded-full grid place-items-center text-sm font-bold flex-shrink-0",
+                              row.rank === 1
+                                ? "bg-yellow-500 text-black"
+                                : row.rank === 2
+                                ? "bg-gray-400 text-black"
+                                : row.rank === 3
+                                ? "bg-amber-700 text-white"
+                                : "bg-gray-700 text-gray-300"
+                            )}
+                          >
+                            {row.rank ?? "—"}
                           </span>
-                        </div>
+
+                          <span className="font-medium truncate flex-1 min-w-0">
+                            {row.name}
+                          </span>
+
+                          <span
+                            className={cn(
+                              "flex-shrink-0 grid place-items-center w-7 h-7 rounded-full",
+                              !row.answered
+                                ? "bg-gray-700 text-gray-400"
+                                : row.isCorrect
+                                ? "bg-green-600 text-white"
+                                : "bg-red-600 text-white"
+                            )}
+                            title={
+                              row.answered
+                                ? row.isCorrect
+                                  ? "Correct"
+                                  : "Incorrect"
+                                : "No answer"
+                            }
+                          >
+                            {row.answered && row.isCorrect ? (
+                              <Check className="w-4 h-4" strokeWidth={3} />
+                            ) : row.answered ? (
+                              <span className="font-black text-xs leading-none">
+                                ✕
+                              </span>
+                            ) : (
+                              <span className="font-black text-xs leading-none">
+                                –
+                              </span>
+                            )}
+                          </span>
+
+                          <span className="flex-shrink-0 w-16 text-right text-xs text-gray-400 tabular-nums">
+                            {row.answered
+                              ? formatResponseTime(row.responseTimeMs)
+                              : "—"}
+                          </span>
+
+                          <span
+                            className={cn(
+                              "flex-shrink-0 w-20 text-right font-bold tabular-nums",
+                              row.pointsAwarded > 0
+                                ? "text-green-400"
+                                : "text-gray-500"
+                            )}
+                          >
+                            {row.answered
+                              ? `+${row.pointsAwarded}`
+                              : "+0"}
+                          </span>
+
+                          <span className="flex-shrink-0 w-24 text-right font-black text-purple-300 tabular-nums">
+                            <CountUp
+                              from={row.totalScore - row.pointsAwarded}
+                              to={row.totalScore}
+                            />
+                          </span>
+                        </motion.div>
                       ))}
                     </div>
                   </CardContent>
@@ -720,30 +973,8 @@ export function HostGamePanel({
             </div>
           )}
 
-          {/* Progression controls are hidden once the backend has signalled
-              there is no next question: the final question auto-finishes into
-              the FINAL RESULTS sequence above (no "Next Question" button). */}
-          {isReveal && !isFinalResults && hasMoreQuestions && (
-            <div className="flex flex-col sm:flex-row gap-3">
-              <Button
-                size="lg"
-                onClick={onNextQuestion}
-                className="flex-1 sm:flex-none sm:min-w-[280px]"
-              >
-                Next Question →
-              </Button>
-
-              <Button
-                variant="outline"
-                size="lg"
-                onClick={onEndGame}
-                className="flex-1 sm:flex-none"
-              >
-                End Quiz
-              </Button>
-            </div>
-          )}
-
+          {/* The progression control lives in the sticky bar at the TOP of
+              the panel, and only exists while another question follows. */}
           {isFinished && !isFinalResults && (
             <div className="p-6 rounded-2xl bg-gradient-to-r from-purple-900/40 to-indigo-900/40 border border-purple-700/50 text-center">
               <p className="text-3xl mb-2">🏁</p>
@@ -761,36 +992,48 @@ export function HostGamePanel({
 
 // Simple celebration particle component
 function CelebrationParticles() {
-  const colors = ["#fbbf24", "#f59e0b", "#fb923c", "#f87171", "#a78bfa", "#60a5fa", "#34d399"];
-  
+  const colors = [
+    "#fbbf24",
+    "#f59e0b",
+    "#fb923c",
+    "#f87171",
+    "#a78bfa",
+    "#60a5fa",
+    "#34d399",
+  ];
+
   return (
-    <div className="fixed inset-0 pointer-events-none overflow-hidden z-50" aria-hidden="true">
+    <div
+      className="fixed inset-0 pointer-events-none overflow-hidden z-50"
+      aria-hidden="true"
+    >
       {Array.from({ length: 30 }).map((_, i) => (
         <motion.div
           key={i}
-          initial={{ 
-            x: Math.random() * window.innerWidth, 
+          initial={{
+            x: Math.random() * window.innerWidth,
             y: window.innerHeight + 50,
             scale: 0,
-            opacity: 0
+            opacity: 0,
           }}
-          animate={{ 
+          animate={{
             y: -100,
             x: Math.random() * window.innerWidth,
             scale: [0, 1, 0],
             opacity: [0, 1, 0],
-            rotate: Math.random() * 360
+            rotate: Math.random() * 360,
           }}
           transition={{
             delay: Math.random() * 1.5,
             duration: 2 + Math.random() * 1.5,
-            ease: "easeOut"
+            ease: "easeOut",
           }}
           style={{
             position: "absolute",
             width: 8 + Math.random() * 8,
             height: 8 + Math.random() * 8,
-            backgroundColor: colors[Math.floor(Math.random() * colors.length)],
+            backgroundColor:
+              colors[Math.floor(Math.random() * colors.length)],
             borderRadius: Math.random() > 0.5 ? "50%" : "4px",
             left: Math.random() * window.innerWidth,
             top: window.innerHeight + 50,

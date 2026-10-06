@@ -1,21 +1,14 @@
 ﻿import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
+import { Check, Gamepad2, Radio, X } from "lucide-react";
 import { useGameSocket } from "../hooks/useGameSocket";
 import { GameState } from "../types/game";
 import { Button } from "../components/ui/Button";
-import { Card, CardHeader, CardContent, CardFooter } from "../components/ui/Card";
+import { Card, CardContent } from "../components/ui/Card";
 import { HostGamePanel } from "../components/game/HostGamePanel";
+import { OPTION_STYLES } from "../components/game/optionStyles";
 import { cn } from "../utils/cn";
-import { formatDistanceToNow } from "date-fns";
-
-// Kahoot's four signature option colours, in wire order.
-const OPTION_TILES = [
-  { tile: "bg-rose-600", shape: "â– " },
-  { tile: "bg-sky-600", shape: "â—" },
-  { tile: "bg-amber-500", shape: "â–²" },
-  { tile: "bg-emerald-600", shape: "â—†" },
-] as const;
 
 export function PlayPage() {
   const { gamePin } = useParams<{ gamePin: string }>();
@@ -44,11 +37,6 @@ export function PlayPage() {
     }
   }, []);
 
-  console.log("[PLAYER GAME] mounting", {
-    gamePin,
-    hasPlayerToken: Boolean(playerToken),
-  });
-
   const {
     connected,
     connecting,
@@ -75,13 +63,6 @@ export function PlayPage() {
     gamePin: gamePin || "",
     playerToken,
     onError: handleSocketError,
-  });
-
-  console.log("[PLAYER GAME] useGameSocket enabled", {
-    gamePin,
-    hasPlayerToken: Boolean(playerToken),
-    connected,
-    connecting,
   });
 
   // Handle reconnection
@@ -128,7 +109,7 @@ export function PlayPage() {
       <div className="min-h-screen flex items-center justify-center px-4">
         <Card className="w-full max-w-md text-center">
           <CardContent className="py-12">
-            <div className="text-6xl mb-4">ðŸŽ®</div>
+            <Gamepad2 className="w-12 h-12 mx-auto mb-4 text-purple-400" strokeWidth={1.5} />
             <h1 className="text-2xl font-bold mb-2">Waiting for Host</h1>
             <p className="text-gray-400 mb-6">The game will start when the host begins</p>
             <div className="flex items-center justify-center gap-2 text-sm text-gray-500">
@@ -201,9 +182,7 @@ export function PlayPage() {
                     className="mt-6 p-6 rounded-xl bg-gradient-to-br from-purple-900/30 to-indigo-900/30 border border-purple-500/30"
                   >
                     <p className="text-lg text-gray-300 leading-relaxed">
-                      See the host screen
-                      <br />
-                      for the final results
+                      See the host for the final results
                     </p>
                   </motion.div>
                 </motion.div>
@@ -240,7 +219,9 @@ export function PlayPage() {
     !alreadyAnswered &&
     !expired;
   const isRevealing = game?.state === GameState.QUESTION_REVEAL && reveal;
-  const isLeaderboard = game?.state === GameState.LEADERBOARD && leaderboard;
+  // Players never receive the leaderboard payload (it is stripped server-side),
+  // so this must key off the game STATE, not the presence of leaderboard data.
+  const isLeaderboard = game?.state === GameState.LEADERBOARD;
 
   if (!displayQuestion && !isLeaderboard) {
     return (
@@ -268,7 +249,7 @@ export function PlayPage() {
           <div className="max-w-5xl mx-auto px-4">
             <div className="flex items-center justify-between h-14 gap-2">
               <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-                <span className="text-xl flex-shrink-0">ðŸŽ®</span>
+                <Gamepad2 className="w-5 h-5 flex-shrink-0 text-purple-400" />
                 <h1 className="font-bold text-base sm:text-lg truncate">
                   {game?.quizTitle || "PLAYOOT"}
                 </h1>
@@ -300,6 +281,9 @@ export function PlayPage() {
             onEndGame={endGame}
             totalQuestions={game?.totalQuestions}
             winnersCount={winnersCount ?? 3}
+            // This stage draws its own h-14 header, so the sticky control bar
+            // must dock 56px down instead of under the app shell nav.
+            stickyOffset="top-14"
           />
         </main>
       </div>
@@ -308,8 +292,8 @@ export function PlayPage() {
 
   // Calculate progress for timer
   const timeLimit = displayQuestion?.timeLimit || 20;
-  const progress = timeRemainingMs !== null && timeRemainingMs > 0 
-    ? (timeRemainingMs / (timeLimit * 1000)) * 100 
+  const progress = timeRemainingMs !== null && timeRemainingMs > 0
+    ? (timeRemainingMs / (timeLimit * 1000)) * 100
     : 0;
 
   return (
@@ -319,7 +303,7 @@ export function PlayPage() {
         <div className="max-w-4xl mx-auto px-4">
           <div className="flex items-center justify-between h-14 gap-2">
             <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-              <span className="text-xl flex-shrink-0">ðŸŽ®</span>
+              <Gamepad2 className="w-5 h-5 flex-shrink-0 text-purple-400" />
               <h1 className="font-bold text-base sm:text-lg truncate">{game?.quizTitle || "PLAYOOT"}</h1>
               <span className="px-2 py-0.5 text-xs font-medium rounded bg-gray-800 text-gray-400 flex-shrink-0 whitespace-nowrap">
                 PIN: {gamePin}
@@ -350,11 +334,11 @@ export function PlayPage() {
                 "font-mono font-bold",
                 timeRemainingMs !== null && timeRemainingMs < 5000 ? "text-red-400 animate-pulse" : "text-purple-400"
               )}>
-                {timeRemainingMs !== null ? `${Math.ceil(timeRemainingMs / 1000)}s` : "â€”"}
+                {timeRemainingMs !== null ? `${Math.ceil(timeRemainingMs / 1000)}s` : "—"}
               </span>
             </div>
             <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-              <div 
+              <div
                 className={cn(
                   "h-full rounded-full transition-all duration-300 ease-linear",
                   timeRemainingMs !== null && timeRemainingMs < 5000 ? "bg-red-500" : "bg-purple-500"
@@ -367,11 +351,11 @@ export function PlayPage() {
 
         {/* ANSWER GRID -------------------------------------------------
             Role/device note: this is the PLAYER stage.  The question text and
-            image are deliberately never rendered here â€” only four large
+            image are deliberately never rendered here — only four large
             touch targets, and one tap locks the choice in. */}
         {displayQuestion && (
           <div className="mb-6 space-y-4">
-            {/* Progress only â€” no question text. */}
+            {/* Progress only — no question text. */}
             <div className="flex items-center justify-between">
               <p className="text-sm font-semibold uppercase tracking-wider text-purple-300">
                 Question {displayQuestion.questionNumber} /{" "}
@@ -384,11 +368,11 @@ export function PlayPage() {
                 )}
               >
                 {expired
-                  ? "â± Time up"
+                  ? "⏰ Time up"
                   : isRevealing || isLeaderboard
-                    ? "âœ… Revealed"
+                    ? "✅ Revealed"
                     : timeRemainingMs === null
-                      ? "â€”"
+                      ? "—"
                       : `${Math.max(
                           0,
                           Math.ceil(timeRemainingMs / 1000)
@@ -398,8 +382,8 @@ export function PlayPage() {
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {displayQuestion.options.map((option, index) => {
-                const tile =
-                  OPTION_TILES[index % OPTION_TILES.length];
+                const style = OPTION_STYLES[index % OPTION_STYLES.length];
+                const Shape = style.Shape;
                 const isCorrect = Boolean(
                   isRevealing &&
                     reveal &&
@@ -434,15 +418,15 @@ export function PlayPage() {
                       "transition-all duration-150 active:scale-[0.98]",
                       "focus:outline-none focus:ring-4 focus:ring-purple-400",
                       "disabled:cursor-default",
-                      tile.tile,
+                      style.tile,
                       stateClass
                     )}
                   >
                     <span
-                      className="w-10 h-10 rounded-lg bg-black/25 grid place-items-center text-lg font-black text-white flex-shrink-0"
+                      className="w-10 h-10 rounded-lg bg-black/25 grid place-items-center text-white flex-shrink-0"
                       aria-hidden="true"
                     >
-                      {tile.shape}
+                      <Shape className="w-5 h-5" strokeWidth={3} />
                     </span>
 
                     <span className="flex-1 text-white font-semibold text-lg leading-snug break-words">
@@ -456,21 +440,19 @@ export function PlayPage() {
                     )}
 
                     {isCorrect && (
-                      <span
-                        className="flex-shrink-0 text-2xl"
+                      <Check
+                        className="flex-shrink-0 w-7 h-7 text-white"
+                        strokeWidth={3}
                         aria-hidden="true"
-                      >
-                        âœ…
-                      </span>
+                      />
                     )}
 
                     {isSelected && isRevealing && !isCorrect && (
-                      <span
-                        className="flex-shrink-0 text-2xl"
+                      <X
+                        className="flex-shrink-0 w-7 h-7 text-white"
+                        strokeWidth={3}
                         aria-hidden="true"
-                      >
-                        âŒ
-                      </span>
+                      />
                     )}
                   </button>
                 );
@@ -480,37 +462,38 @@ export function PlayPage() {
             {!isAnswering && !isRevealing && !isLeaderboard && (
               <p className="text-center text-sm text-gray-400">
                 {expired
-                  ? "â± Time's up â€” waiting for the hostâ€¦"
-                  : "Answer locked â€” waiting for the host to continueâ€¦"}
+                  ? "⏰ Time's up — waiting for the host…"
+                  : "Answer locked — waiting for the host to continue…"}
               </p>
             )}
           </div>
         )}
 
-              {/* My Result */}
-              {myResult && (isRevealing || isLeaderboard) && (
-                <div className={cn(
-                  "mt-6 p-4 rounded-xl text-center",
-                  myResult.isCorrect ? "bg-green-900/30 border border-green-500" : "bg-red-900/30 border border-red-500"
-                )}>
-                  <p className="text-lg font-bold">
-                    {myResult.isCorrect ? "âœ… Correct!" : "âŒ Incorrect"}
-                  </p>
-                  {reveal?.explanation && (
-                    <p className="text-sm text-gray-300 mt-2 italic">ðŸ’¡ {reveal.explanation}</p>
-                  )}
-                </div>
-              )}
+        {/* My Result — correct/incorrect feedback only, never a score. */}
+        {myResult && (isRevealing || isLeaderboard) && (
+          <div className={cn(
+            "mt-6 p-4 rounded-xl text-center",
+            myResult.isCorrect ? "bg-green-900/30 border border-green-500" : "bg-red-900/30 border border-red-500"
+          )}>
+            <p className="text-lg font-bold">
+              {myResult.isCorrect ? "✅ Correct!" : "❌ Incorrect"}
+            </p>
+            {reveal?.explanation && (
+              <p className="text-sm text-gray-300 mt-2 italic">💡 {reveal.explanation}</p>
+            )}
+          </div>
+        )}
 
-        {/* Leaderboard */}
-        {/* Players never see scores: the host announces results. */}
+        {/* Waiting state — players never see scores: the host announces results. */}
         {isLeaderboard && (
           <Card variant="outlined" className="text-center py-8">
             <CardContent>
-              <p className="text-gray-300 font-medium">Round complete â€” waiting for the hostâ€¦</p>
+              <Radio className="w-6 h-6 mx-auto mb-3 text-purple-400" strokeWidth={1.5} />
+              <p className="text-gray-300 font-medium">Round complete — waiting for the host…</p>
             </CardContent>
           </Card>
         )}
+
         {/* Waiting for next question */}
         {game && game.state === GameState.QUESTION_REVEAL && !reveal && (
           <Card variant="outlined" className="text-center py-12">
@@ -535,7 +518,7 @@ export function PlayPage() {
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
             <Card className="w-full max-w-md text-center">
               <CardContent className="py-8">
-                <div className="text-5xl mb-4">ðŸ“¡</div>
+                <Radio className="w-10 h-10 mx-auto mb-4 text-purple-400" strokeWidth={1.5} />
                 <h2 className="text-xl font-bold mb-2">Connection Lost</h2>
                 <p className="text-gray-400 mb-6">Trying to reconnect...</p>
                 <Button onClick={handleRejoin} variant="outline">Reconnect Now</Button>

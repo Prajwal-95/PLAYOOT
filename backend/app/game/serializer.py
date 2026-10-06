@@ -314,6 +314,26 @@ def leaderboard_payload(engine: "GameEngine") -> dict[str, Any]:
     return {"mode": "individual", "entries": ranked, "updatedAt": iso(utcnow())}
 
 
+def _player_safe_reveal(reveal: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reveal for players: correct answer + distribution, no per-player scores.
+
+    ``results`` carries ``pointsAwarded``/``totalScore`` for every participant,
+    so it must never leave the host socket.  Score privacy is enforced here in
+    the serialiser - not with CSS - so a player socket has nothing to hide.
+    """
+    if not isinstance(reveal, dict):
+        return reveal
+    safe = dict(reveal)
+    safe.pop("results", None)
+    return safe
+
+
+def _winners_count(engine: "GameEngine") -> int:
+    """Authoritative podium size from the quiz configuration (1/3/5/10)."""
+    configured = engine.quiz.winners_count if engine.quiz is not None else None
+    return configured or 3
+
+
 # -------------------------------------------------------------- full state
 def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[str, Any]:
     """Complete snapshot used for the initial handshake and for reconnection.
@@ -325,6 +345,8 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
     When `for_player_id` is provided, the payload is sanitized for a player socket:
     - No scores in player/team objects
     - No leaderboard
+    - No per-player ``reveal.results`` (points / totals / response times)
+    - No ``winnersCount``
     - myResult excludes pointsAwarded
     - me excludes score
     """
@@ -361,7 +383,15 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
     player_builder = player_payload_safe if is_player else player_payload
     team_builder = team_payload_safe if is_player else team_payload
 
-    return {
+    # The answer has been disclosed once the question closed, but the
+    # per-player breakdown stays host-only.
+    reveal: dict[str, Any] | None = None
+    if engine.state.value in {"QUESTION_REVEAL", "LEADERBOARD"}:
+        reveal = reveal_payload(engine)
+        if is_player:
+            reveal = _player_safe_reveal(reveal)
+
+    payload: dict[str, Any] = {
         "game": {
             "gameId": engine.id,
             "gamePin": engine.pin,
@@ -390,11 +420,7 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
             )
         ],
         "currentQuestion": current_question,
-        "reveal": (
-            reveal_payload(engine)
-            if engine.state.value in {"QUESTION_REVEAL", "LEADERBOARD"}
-            else None
-        ),
+        "reveal": reveal,
         "leaderboard": None if is_player else leaderboard_payload(engine),
         "timeRemainingMs": engine.time_remaining_ms(),
         "questionStartedAt": iso(engine.question_started_at),
@@ -406,15 +432,12 @@ def state_payload(engine: "GameEngine", *, for_player_id: int | None) -> dict[st
         "serverTime": iso(utcnow()),
     }
 
+    if not is_player:
+        # Host-only: a refreshed host must still know how many podium slots
+        # to offer.  Omitted entirely for players rather than sent as null.
+        payload["winnersCount"] = _winners_count(engine)
 
-def _player_safe_reveal(reveal: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Reveal for players: correct answer + distribution, no per-player scores."""
-    if not isinstance(reveal, dict):
-        return reveal
-    safe = dict(reveal)
-    # `results` carries totalScore/pointsAwarded per player - host only.
-    safe.pop("results", None)
-    return safe
+    return payload
 
 
 def sanitize_event_for_player(

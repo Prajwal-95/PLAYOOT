@@ -268,6 +268,12 @@ export function useGameSocket({
           setCanStart(p.canStart);
           setServerTime(p.serverTime);
 
+          // Host-only: the authoritative podium size.  The backend omits the
+          // key entirely from player snapshots, so leave it untouched there.
+          if (typeof p.winnersCount === "number") {
+            setWinnersCount(p.winnersCount);
+          }
+
           // Resync the display countdown to the authoritative deadline.
           syncDeadline(p.questionEndsAt, p.serverTime);
           setHasMoreQuestions(
@@ -414,6 +420,22 @@ export function useGameSocket({
                 }
               : null
           );
+
+          // The reveal carries the authoritative correct answer.  Derive the
+          // player's own verdict from it: the ANSWER_SUBMITTED payload can
+          // only ever report `isCorrect: null`, which made every player see
+          // "Incorrect" even when they were right.
+          const correctIndex = p.reveal?.correctIndex;
+          if (typeof correctIndex === "number") {
+            setMyResult((prev) =>
+              prev && typeof prev.selectedAnswer === "number"
+                ? {
+                    ...prev,
+                    isCorrect: prev.selectedAnswer === correctIndex,
+                  }
+                : prev
+            );
+          }
 
           break;
         }

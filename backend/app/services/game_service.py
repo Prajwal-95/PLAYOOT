@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +26,7 @@ from app.game.errors import GameError, GameErrorCode
 from app.game.events import WSEventType
 from app.game.registry import get_registry
 from app.game.states import JOINABLE_STATES, GameState
-from app.models.game import GameSession, Player, Team
+from app.models.game import Answer, GameSession, Player, Team
 from app.models.quiz import Quiz
 from app.models.user import User
 
@@ -181,13 +181,75 @@ async def leave_game(session: AsyncSession, *, pin: str, player_id: int) -> None
     if engine.state in JOINABLE_STATES:
         await session.delete(player)
         await session.commit()
-        await engine.broadcast_lobby_state(WSEventType.PLAYER_LEFT, {"playerId": player_id})
+        # Mutate the live roster BEFORE announcing the departure: broadcasting
+        # first shipped a snapshot that still contained the leaving player, so
+        # every client re-rendered them back onto the screen.
         await engine.remove_player(player_id, broadcast=False)
+        await engine.broadcast_lobby_state(
+            WSEventType.PLAYER_LEFT, {"playerId": player_id}
+        )
         return
 
     player.connected = False
     await session.commit()
     await engine.set_player_connected(player_id, False, broadcast=True)
+
+
+async def remove_player_by_host(
+    session: AsyncSession,
+    *,
+    pin: str,
+    host_user_id: int,
+    target_player_id: int,
+) -> None:
+    """Host removes a participant from the game.
+
+    - In LOBBY: deletes the player row entirely and frees the seat.
+    - During gameplay: only allowed for disconnected players.  Removes their
+      player row and invalidates their token so they cannot reconnect with it.
+    - Validation, the database purge and the in-memory roster change all run
+      inside ``engine.lock``, so a removal can never interleave with an
+      in-flight answer transaction.
+    - The roster broadcast happens strictly *after* the removal, so clients
+      never receive a snapshot that still lists the removed player.
+    """
+    engine = await get_engine(session, pin)
+
+    # Verify host ownership before touching anything.
+    if engine.host_id != host_user_id:
+        raise GameError(GameErrorCode.UNAUTHORIZED_HOST, "Only the host can remove players.")
+
+    async with engine.lock:
+        player = await session.get(Player, target_player_id)
+        if player is None or player.game_id != engine.id:
+            raise GameError(GameErrorCode.PLAYER_NOT_IN_GAME)
+
+        # During active gameplay, only allow removing disconnected players.
+        if engine.state not in JOINABLE_STATES:
+            live_player = engine.players.get(target_player_id)
+            is_connected = live_player.connected if live_player else player.connected
+            if is_connected:
+                raise GameError(
+                    GameErrorCode.BAD_REQUEST,
+                    "Cannot remove an actively connected player. Wait for them to disconnect.",
+                )
+
+        # `answers.player_id` references `players` - purge the answers first so
+        # the seat is freed without depending on the database enforcing
+        # ON DELETE CASCADE.
+        await session.execute(delete(Answer).where(Answer.player_id == target_player_id))
+        await session.delete(player)
+        await session.commit()
+
+        engine.drop_player(target_player_id)
+
+    # The old token is already dead (the row is gone, so the WebSocket rejects
+    # it); close the live socket too so nothing keeps streaming to a ghost.
+    await engine.manager.close_player(target_player_id)
+
+    await engine.broadcast_lobby_state(
+        WSEventType.PLAYER_LEFT, {"playerId": target_player_id}
+    )
 
 
 # ---------------------------------------------------------------------- teams

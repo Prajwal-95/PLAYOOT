@@ -90,6 +90,9 @@ export const api = {
       headers: { "X-Player-Token": playerToken },
     }),
 
+  removePlayer: (pin: string, playerId: number) =>
+    request<void>(`/games/${pin}/players/${playerId}`, { method: "DELETE" }),
+
   createTeam: (pin: string, data: TeamCreateIn, playerToken: string) =>
     request<TeamOut>(`/games/${pin}/teams`, {
       method: "POST",

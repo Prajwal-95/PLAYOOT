@@ -18,6 +18,14 @@ import {
 import { cn } from "../utils/cn";
 import { Player, Team, GameState } from "../types/game";
 import { HostGamePanel } from "../components/game/HostGamePanel";
+import {
+  Copy,
+  Share2,
+  AlertCircle,
+  Check,
+  X,
+  UserX,
+} from "lucide-react";
 
 export function HostLobbyPage() {
   const { quizId, gamePin } = useParams<{
@@ -36,6 +44,11 @@ export function HostLobbyPage() {
 
   // Host authentication token
   const hostToken = localStorage.getItem("access_token");
+
+  // Share link state
+  const [shareLink, setShareLink] = useState<string>("");
+  const [copyFeedback, setCopyFeedback] = useState<"idle" | "success" | "error">("idle");
+  const [removeConfirm, setRemoveConfirm] = useState<{ playerId: number; nickname: string } | null>(null);
 
   // Keep callback stable so the WebSocket hook does not
   // reconnect unnecessarily during React re-renders.
@@ -58,6 +71,13 @@ export function HostLobbyPage() {
     }
   }, [game?.game_pin, socketPin]);
 
+  // Generate share link when game PIN is available
+  useEffect(() => {
+    if (game?.game_pin) {
+      setShareLink(`${window.location.origin}/join?pin=${game.game_pin}`);
+    }
+  }, [game?.game_pin]);
+
   const {
     connected,
     role,
@@ -69,6 +89,7 @@ export function HostLobbyPage() {
     leaderboard,
     timeRemainingMs,
     hasMoreQuestions,
+    winnersCount,
     startGame,
     nextQuestion,
     endQuestion,
@@ -79,6 +100,97 @@ export function HostLobbyPage() {
     hostToken: hostToken || undefined,
     onError: handleSocketError,
   });
+
+  // Remove player handler
+  const handleRemovePlayer = useCallback(async (playerId: number, nickname: string) => {
+    setRemoveConfirm({ playerId, nickname });
+  }, []);
+
+  const confirmRemovePlayer = useCallback(async () => {
+    if (!removeConfirm || !game) return;
+
+    try {
+      setError("");
+      await api.removePlayer(game.game_pin, removeConfirm.playerId);
+      // The WebSocket will receive PLAYER_LEFT and update the roster
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove player");
+    } finally {
+      setRemoveConfirm(null);
+    }
+  }, [removeConfirm, game]);
+
+  const cancelRemovePlayer = useCallback(() => {
+    setRemoveConfirm(null);
+  }, []);
+
+  // Copy share link to clipboard.
+  //
+  // The payload is ONLY the public join URL - never a token, never a JWT, never
+  // a game secret.  `navigator.clipboard` is unavailable on insecure origins,
+  // so a hidden-textarea execCommand fallback keeps the button working there
+  // too, and the confirmation is rendered inline (no browser alert()).
+  const handleCopyLink = useCallback(async () => {
+    if (!shareLink) return;
+
+    const fallbackCopy = (): boolean => {
+      try {
+        const input = document.createElement("textarea");
+        input.value = shareLink;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.top = "-1000px";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        input.setSelectionRange(0, shareLink.length);
+        const ok = document.execCommand("copy");
+        document.body.removeChild(input);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(shareLink);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+
+    if (!copied) {
+      copied = fallbackCopy();
+    }
+
+    setCopyFeedback(copied ? "success" : "error");
+    window.setTimeout(() => setCopyFeedback("idle"), 3000);
+  }, [shareLink]);
+
+  // Native share
+  const handleNativeShare = useCallback(async () => {
+    if (!shareLink || !game) return;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "PLAYOOT Quiz",
+          text: `Join the game: ${game.quiz_title}`,
+          url: shareLink,
+        });
+      } catch (err) {
+        // User cancelled or share failed - fallback to copy
+        if (err instanceof Error && err.name !== "AbortError") {
+          handleCopyLink();
+        }
+      }
+    } else {
+      handleCopyLink();
+    }
+  }, [shareLink, game, handleCopyLink]);
 
   // ---------------------------------------------------------
   // CREATE GAME FROM QUIZ
@@ -513,6 +625,11 @@ export function HostLobbyPage() {
             onNextQuestion={nextQuestion}
             onEndQuestion={endQuestion}
             onEndGame={endGame}
+            totalQuestions={game.question_count}
+            winnersCount={winnersCount ?? 3}
+            // The app-shell nav above this page is h-16, so the sticky bar
+            // docks directly underneath it.
+            stickyOffset="top-16"
           />
         ) : (
           <Card variant="outlined">
@@ -524,6 +641,106 @@ export function HostLobbyPage() {
             </CardContent>
           </Card>
         ))}
+
+      {/* =====================================================
+          SHARE / JOIN  (prominent)
+          Carries ONLY the public join URL - never a token or JWT.
+      ====================================================== */}
+
+      {!isPlaying && (
+        <Card
+          variant="outlined"
+          className="border-purple-500/40 bg-gradient-to-br from-purple-900/25 via-gray-900 to-indigo-900/25 overflow-hidden"
+        >
+          <CardContent className="p-5 sm:p-7">
+            <div className="flex flex-col lg:flex-row gap-6 lg:items-center">
+              {/* GAME PIN */}
+              <div className="lg:flex-shrink-0 p-5 rounded-2xl bg-black/40 border border-purple-500/40 text-center">
+                <p className="text-[11px] uppercase tracking-[0.3em] text-gray-400 mb-2">
+                  Game PIN
+                </p>
+                <p className="font-mono text-5xl sm:text-6xl font-black text-purple-300 tracking-[0.15em]">
+                  {game.game_pin}
+                </p>
+              </div>
+
+              {/* SHARE LINK */}
+              <div className="flex-1 min-w-0 space-y-3">
+                <p className="text-[11px] uppercase tracking-[0.3em] text-gray-400">
+                  Share link
+                </p>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={
+                      shareLink ||
+                      `${window.location.origin}/join?pin=${game.game_pin}`
+                    }
+                    onFocus={(event) => event.currentTarget.select()}
+                    className="flex-1 min-w-0 bg-black/40 border border-gray-700 rounded-xl px-4 py-3 text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    aria-label="Game join link"
+                  />
+
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    onClick={handleCopyLink}
+                    className="whitespace-nowrap"
+                    aria-label={
+                      copyFeedback === "success" ? "Link copied!" : "Copy link"
+                    }
+                  >
+                    {copyFeedback === "success" ? (
+                      <>
+                        <Check className="w-4 h-4 mr-2 text-green-400" />
+                        Link copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4 mr-2" />
+                        Copy Link
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    onClick={handleNativeShare}
+                    className="whitespace-nowrap"
+                  >
+                    <Share2 className="w-4 h-4 mr-2" />
+                    Share
+                  </Button>
+                </div>
+
+                {copyFeedback === "success" && (
+                  <p
+                    className="text-sm text-green-400 flex items-center gap-2"
+                    role="status"
+                  >
+                    <Check className="w-4 h-4 flex-shrink-0" />
+                    Link copied!
+                  </p>
+                )}
+
+                {copyFeedback === "error" && (
+                  <p className="text-sm text-red-400" role="alert">
+                    Could not copy automatically — select the link and copy it
+                    manually.
+                  </p>
+                )}
+
+                <p className="text-xs text-gray-500">
+                  Players open this link → enter a nickname → join instantly.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* =====================================================
           MAIN GRID
@@ -639,9 +856,24 @@ export function HostLobbyPage() {
 
                     </div>
 
-                    <span className="text-lg font-bold text-purple-400">
-                      {player.score}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg font-bold text-purple-400">
+                        {player.score}
+                      </span>
+                      {/* Remove player button - only for disconnected players or in LOBBY */}
+                      {(gameState === "LOBBY" || !player.connected) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-400 hover:bg-red-900/20 p-1.5"
+                          onClick={() => handleRemovePlayer(getPlayerId(player), player.nickname)}
+                          aria-label={`Remove ${player.nickname}`}
+                          title="Remove player"
+                        >
+                          <UserX className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </div>
 
                   </div>
 
@@ -763,145 +995,46 @@ export function HostLobbyPage() {
         <Card variant="outlined">
 
           <CardHeader>
-            <h2 className="text-xl font-semibold">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              <span className="text-purple-400">🎮</span>
               Game Info
             </h2>
           </CardHeader>
 
           <CardContent className="space-y-4">
 
-            <div className="p-4 bg-gray-800/50 rounded-lg text-center">
-
-              <p className="text-gray-500 text-sm">
-                Game PIN
-              </p>
-
-              <p className="font-mono text-3xl font-bold text-purple-400 tracking-widest mt-1">
-                {game.game_pin}
-              </p>
-
-            </div>
-
+            {/* Game Details */}
             <div className="space-y-2 text-sm">
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Status
-                </span>
-
-                <span className="font-medium capitalize">
-                  {gameState
-                    .toLowerCase()
-                    .replaceAll("_", " ")}
+                <span className="text-gray-500">Status</span>
+                <span className="font-medium capitalize text-white">
+                  {gameState.toLowerCase().replaceAll("_", " ")}
                 </span>
               </div>
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Mode
-                </span>
-
-                <span className="font-medium">
-                  {game.mode === "team"
-                    ? "Team (max 4/team)"
-                    : "Individual"}
+                <span className="text-gray-500">Mode</span>
+                <span className="font-medium text-white">
+                  {game.mode === "team" ? "Team (max 4/team)" : "Individual"}
                 </span>
               </div>
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Quiz
-                </span>
-
-                <span className="font-medium truncate max-w-[150px]">
+                <span className="text-gray-500">Quiz</span>
+                <span className="font-medium text-white truncate max-w-[150px]">
                   {game.quiz_title}
                 </span>
               </div>
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Questions
-                </span>
-
-                <span className="font-medium">
-                  {game.question_count}
-                </span>
+                <span className="text-gray-500">Questions</span>
+                <span className="font-medium text-white">{game.question_count}</span>
               </div>
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Players
-                </span>
-
-                <span className="font-medium">
-                  {displayPlayers.length}
-                </span>
+                <span className="text-gray-500">Players</span>
+                <span className="font-medium text-white">{displayPlayers.length}</span>
               </div>
-
               <div className="flex justify-between">
-                <span className="text-gray-500">
-                  Teams
-                </span>
-
-                <span className="font-medium">
-                  {displayTeams.length}
-                </span>
+                <span className="text-gray-500">Teams</span>
+                <span className="font-medium text-white">{displayTeams.length}</span>
               </div>
-
-            </div>
-
-            <div className="pt-4 border-t border-gray-700">
-
-              <p className="text-xs text-gray-500 text-center">
-                Share the PIN above with players.
-                They join at /join
-              </p>
-
-            </div>
-
-            {/* Share Link */}
-
-            <div className="pt-4 border-t border-gray-700">
-
-              <p className="text-xs text-gray-500 text-center mb-2">
-                Or share a direct link:
-              </p>
-
-              <div className="flex gap-2">
-
-                <input
-                  type="text"
-                  readOnly
-                  value={`${window.location.origin}/join?pin=${game.game_pin}`}
-                  className="flex-1 px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                />
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const link =
-                      `${window.location.origin}/join?pin=${game.game_pin}`;
-
-                    navigator.clipboard
-                      .writeText(link)
-                      .then(() => {
-                        alert(
-                          "Link copied to clipboard!"
-                        );
-                      })
-                      .catch(() => {
-                        setError(
-                          "Could not copy link to clipboard."
-                        );
-                      });
-                  }}
-                >
-                  Copy Link
-                </Button>
-
-              </div>
-
             </div>
 
           </CardContent>
@@ -910,6 +1043,45 @@ export function HostLobbyPage() {
 
       </div>
       )}
+
+      {/* Remove Player Confirmation Modal */}
+      {removeConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <Card className="w-full max-w-md">
+            <CardContent className="p-6 space-y-4">
+              <div className="text-center">
+                <div className="w-12 h-12 rounded-full bg-red-900/30 border border-red-500/30 flex items-center justify-center mx-auto mb-3">
+                  <AlertCircle className="w-6 h-6 text-red-400" />
+                </div>
+                <h3 className="text-lg font-semibold">Remove Player</h3>
+                <p className="text-gray-400 mt-1">
+                  Remove <strong className="text-white">{removeConfirm.nickname}</strong> from this game?
+                </p>
+                <p className="text-xs text-gray-500 mt-2">
+                  Their seat will be freed and they can rejoin with a new nickname.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={cancelRemovePlayer}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="danger"
+                  className="flex-1"
+                  onClick={confirmRemovePlayer}
+                >
+                  Remove
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
     </div>
   );
 }

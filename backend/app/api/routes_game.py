@@ -169,6 +169,20 @@ async def leave_game(
     return None
 
 
+@router.delete("/{pin}/players/{player_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def remove_player(
+    pin: str,
+    player_id: int,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Host removes a participant from the game."""
+    await game_service.remove_player_by_host(
+        session, pin=pin, host_user_id=user.id, target_player_id=player_id
+    )
+    return None
+
+
 # -------------------------------------------------------------------- teams
 @router.post("/{pin}/teams", response_model=TeamOut, status_code=status.HTTP_201_CREATED)
 async def create_team(

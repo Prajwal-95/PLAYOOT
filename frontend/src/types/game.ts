@@ -217,6 +217,8 @@ export interface GameSnapshot {
   me: Player | null;
   canStart: boolean;
   serverTime: string;
+  /** Host-only: authoritative podium size (1/3/5/10). Omitted for players. */
+  winnersCount?: number;
 }
 
 export interface WSEnvelope<T = unknown> {

@@ -164,6 +164,25 @@ class ConnectionManager:
         await self.unregister(connection)
         return False
 
+    async def close_player(
+        self, player_id: int, *, code: int = 4404, reason: str = "Removed from game"
+    ) -> bool:
+        """Force-close the live socket of a player.  Returns True if one existed.
+
+        Used when the host removes a participant: the seat is gone, so the old
+        socket must not keep streaming game events (or keep the roster
+        "connected") until it happens to time out on its own.
+        """
+        connection = self._players.get(player_id)
+        if connection is None:
+            return False
+        try:
+            await connection.websocket.close(code=code, reason=reason)
+        except Exception:  # pragma: no cover - socket already gone
+            pass
+        await self.unregister(connection)
+        return True
+
     async def send_to_hosts(
         self, game_pin: str, event_type: WSEventType | str, payload: dict[str, Any] | None = None
     ) -> int:

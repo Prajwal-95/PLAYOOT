@@ -399,6 +399,20 @@ class GameEngine:
                 WSEventType.PLAYER_LEFT, {"player": player_payload(player, self)}
             )
 
+    def drop_player(self, player_id: int) -> LivePlayer | None:
+        """Memory-only seat release.  Caller must hold ``self.lock``.
+
+        Used by the host-removal path, which has to validate, purge the
+        database rows and mutate the roster as ONE critical section so it can
+        never interleave with an in-flight answer transaction.  Broadcasting
+        is deliberately *not* done here: the caller emits ``PLAYER_LEFT``
+        afterwards, once the roster actually reflects the removal.
+        """
+        player = self.players.pop(player_id, None)
+        self.answered.pop(player_id, None)
+        self._reindex_teams()
+        return player
+
     async def set_player_connected(
         self, player_id: int, connected: bool, *, broadcast: bool = False
     ) -> LivePlayer | None:
